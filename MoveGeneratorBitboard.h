@@ -1295,9 +1295,6 @@ public:
     }
 
 
-    // TODO: have another function called countMoves... that only counts the no. of valid moves without generating them
-    // or maybe make it tempelated function ?
-
     // generates moves for the given board position
     // returns the no of moves generated
     // newPositions contains the new positions after making the generated moves
@@ -1553,6 +1550,7 @@ public:
             myPawns ^= pawn;
         }
 
+        // generate castling moves
         if (chance == WHITE)
         {
             if ((pos->whiteCastle & CASTLE_FLAG_KING_SIDE) &&   // castle flag is set

@@ -4,18 +4,24 @@
 
 #define DEBUG_PRINT_MOVES 0
 #if DEBUG_PRINT_MOVES == 1
+    #define DEBUG_PRINT_DEPTH 6
     bool printMoves = false;
 #endif
 
+// only count moves at leaves (instead of generating/making them)
+#define USE_COUNT_ONLY_OPT true
+
+// move generation functions templated on chance
 #define USE_TEMPLATE_CHANCE_OPT 1
 
+// bitwise magic instead of if/else for castle flag updation
 #define USE_BITWISE_MAGIC_FOR_CASTLE_FLAG_UPDATION 1
 
 // Move counting (countOnly) doesn't work with old method
 #define EN_PASSENT_GENERATION_NEW_METHOD 1
 
 // intel core 2 doesn't have popcnt instruction
-#define USE_POPCNT 1
+#define USE_POPCNT 0
 
 // use lookup table for king moves
 #define USE_KING_LUT 1
@@ -77,7 +83,7 @@ __forceinline uint8 popCount(uint64 x)
 {
 #if USE_POPCNT == 1
 #ifdef _WIN64
-    return __popcnt64(x);
+    return _mm_popcnt_u64(x);
 #else
     uint32 lo = (uint32)  x;
     uint32 hi = (uint32) (x >> 32);
@@ -1163,7 +1169,13 @@ public:
                 {
                     if (dst & safeSquares)
                     {
-                        if (countOnly) nMoves++;
+                        if (countOnly) 
+                        {
+                            if (dst & (RANK1 | RANK8))
+                                nMoves += 4;    // promotion
+                            else
+                                nMoves++;
+                        }
                         else addPawnMoves(&nMoves, &newPositions, pos, pawn, dst, chance);
                     }
                     else
@@ -1186,7 +1198,13 @@ public:
                 dst = (westCapture | eastCapture) & enemyPieces & safeSquares;
                 if (dst) 
                 {
-                    if (countOnly) nMoves++;    
+                    if (countOnly) 
+                    {
+                        if (dst & (RANK1 | RANK8))
+                            nMoves += 4;    // promotion
+                        else
+                            nMoves++;
+                    }
                     else addPawnMoves(&nMoves, &newPositions, pos, pawn, dst, chance);
                 }
 
@@ -1370,7 +1388,10 @@ public:
                         else addEnPassentMove(&nMoves, &newPositions, pos, pawn, enPassentTarget, chance);
                     }
                 }
-                else
+                else 
+                /*if (!(enPassentCapturedPiece & pinned))*/   
+                // the captured pawn should not be pinned in diagonal direction but it can be in vertical dir.
+                // the diagonal pinning can't happen for enpassent in real chess game, so anyways it's not vaild
                 {
                     uint64 propogator = (~allPieces) | enPassentCapturedPiece | pawn;
                     uint64 causesCheck = (eastAttacks(enemyRooks, propogator) | westAttacks(enemyRooks, propogator)) & 

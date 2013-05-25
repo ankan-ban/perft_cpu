@@ -19,67 +19,6 @@ double gTime;
 // for timing CPU code : end
 
 
-// perft counter function. Returns perft of the given board for given depth
-uint64 perft_bb(HexaBitBoardPosition *pos, uint32 depth)
-{
-    HexaBitBoardPosition newPositions[256];
-
-#if DEBUG_PRINT_MOVES == 1
-    if (depth == DEBUG_PRINT_DEPTH)
-        printMoves = true;
-    else
-        printMoves = false;
-#endif    
-
-    uint32 nMoves = 0;
-    uint8 chance = pos->chance;
-
-    if (depth == 1)
-    {
-#if USE_TEMPLATE_CHANCE_OPT == 1
-    if (chance == BLACK)
-    {
-        nMoves = MoveGeneratorBitboard::generateMoves<BLACK, USE_COUNT_ONLY_OPT>(pos, newPositions);
-    }
-    else
-    {
-        nMoves = MoveGeneratorBitboard::generateMoves<WHITE, USE_COUNT_ONLY_OPT>(pos, newPositions);
-    }
-#else
-    nMoves = MoveGeneratorBitboard::generateMoves(pos, newPositions, chance, USE_COUNT_ONLY_OPT);
-#endif
-        return nMoves;
-    }
-
-#if USE_TEMPLATE_CHANCE_OPT == 1
-    if (chance == BLACK)
-    {
-        nMoves = MoveGeneratorBitboard::generateMoves<BLACK, false>(pos, newPositions);
-    }
-    else
-    {
-        nMoves = MoveGeneratorBitboard::generateMoves<WHITE, false>(pos, newPositions);
-    }
-#else
-    nMoves = MoveGeneratorBitboard::generateMoves(pos, newPositions, chance, false);
-#endif
-
-    uint64 count = 0;
-
-    for (uint32 i=0; i < nMoves; i++)
-    {
-        uint64 childPerft = perft_bb(&newPositions[i], depth - 1);
-#if DEBUG_PRINT_MOVES == 1
-        if (depth == DEBUG_PRINT_DEPTH)
-            printf("%llu\n", childPerft);
-#endif
-        count += childPerft;
-    }
-
-    return count;
-}
-
-
 
 int main()
 {

@@ -37,13 +37,8 @@
 // use lookup table for knight moves
 #define USE_KNIGHT_LUT 1
 
-// use lookup table (magics) for sliding moves
+// use lookup table (magics) for sliding moves (TODO)
 #define USE_SLIDING_LUT 1
-
-// use fancy fixed-shift version - ~ 800 KB lookup tables
-// (setting this to 0 enables plain magics - with 2.3 MB lookup table)
-// plain magics is a bit faster at least for perft
-#define USE_FANCY_MAGICS 0
 
 // bit board constants
 #define C64(constantU64) constantU64##ULL
@@ -181,8 +176,8 @@ static uint64 BishopAttacksMasked [64];
 uint64 rookMagicAttackTables      [64][1 << ROOK_MAGIC_BITS  ];    // 2 MB
 uint64 bishopMagicAttackTables    [64][1 << BISHOP_MAGIC_BITS];    // 256 KB
 
-uint64 findRookMagicForSquare(int square, uint64 magicAttackTable[], uint64 magic = 0);
-uint64 findBishopMagicForSquare(int square, uint64 magicAttackTable[], uint64 magic = 0);
+uint64 findRookMagicForSquare(int square, uint64 magicAttackTable[]);
+uint64 findBishopMagicForSquare(int square, uint64 magicAttackTable[]);
 
 #if TEST_GPU_PERFT == 1
 // gpu version of the above data structures
@@ -546,34 +541,18 @@ public:
     {
         uint8 square = bitScan(bishop);
         uint64 occ = (~pro) & BishopAttacksMasked[square];
-
-#if USE_FANCY_MAGICS == 1
-        uint64 magic  = bishop_magics_fancy[square].factor;
-        uint64 *table = &fancy_magic_lookup_table[bishop_magics_fancy[square].position];
-        uint64 index = (magic * occ) >> (64 - BISHOP_MAGIC_BITS);
-        return table[index];
-#else
         uint64 magic = bishopMagics[square];
         uint64 index = (magic * occ) >> (64 - BISHOP_MAGIC_BITS);
         return bishopMagicAttackTables[square][index];
-#endif
     }
 
     CUDA_CALLABLE_MEMBER __forceinline static uint64 rookAttacks(uint64 rook, uint64 pro)
     {
         uint8 square = bitScan(rook);
         uint64 occ = (~pro) & RookAttacksMasked[square];
-
-#if USE_FANCY_MAGICS == 1
-        uint64 magic  = rook_magics_fancy[square].factor;
-        uint64 *table = &fancy_magic_lookup_table[rook_magics_fancy[square].position];
-        uint64 index = (magic * occ) >> (64 - ROOK_MAGIC_BITS);
-        return table[index];
-#else
         uint64 magic = rookMagics[square];
         uint64 index = (magic * occ) >> (64 - ROOK_MAGIC_BITS);
         return rookMagicAttackTables[square][index];
-#endif
     }
 
     CUDA_CALLABLE_MEMBER __forceinline static uint64 multiBishopAttacks(uint64 bishops, uint64 pro)
@@ -582,7 +561,11 @@ public:
         while(bishops)
         {
             uint64 bishop = getOne(bishops);
-            attacks |= bishopAttacks(bishop, pro);
+            uint8 square = bitScan(bishop);
+            uint64 occ = (~pro) & BishopAttacksMasked[square];
+            uint64 magic = bishopMagics[square];
+            uint64 index = (magic * occ) >> (64 - BISHOP_MAGIC_BITS);
+            attacks |= bishopMagicAttackTables[square][index];
             bishops ^= bishop;
         }
 
@@ -595,7 +578,11 @@ public:
         while(rooks)
         {
             uint64 rook = getOne(rooks);
-            attacks |= rookAttacks(rook, pro);
+            uint8 square = bitScan(rook);
+            uint64 occ = (~pro) & RookAttacksMasked[square];
+            uint64 magic = rookMagics[square];
+            uint64 index = (magic * occ) >> (64 - ROOK_MAGIC_BITS);
+            attacks |= rookMagicAttackTables[square][index];
             rooks ^= rook;
         }
 
@@ -781,7 +768,6 @@ public:
 
 
         // initialize magic lookup tables
-
         srand (time(NULL));
         for (int square = A1; square <= H8; square++)
         {
@@ -805,21 +791,14 @@ public:
 
             mask = sqBishopAttacks(square)  & (~thisSquare) & CENTRAL_SQUARES;
             BishopAttacksMasked[square] = mask;
-#if USE_FANCY_MAGICS != 1
+
             rookMagics  [square] = findRookMagicForSquare  (square, rookMagicAttackTables  [square]);
             bishopMagics[square] = findBishopMagicForSquare(square, bishopMagicAttackTables[square]);
-#endif
         }
 
         // initialize fancy magic lookup table
-        for (int square = A1; square <= H8; square++)
-        {
-            uint64 rookMagic = findRookMagicForSquare  (square, &fancy_magic_lookup_table[rook_magics_fancy[square].position], rook_magics_fancy[square].factor);
-            assert(rookMagic == rook_magics_fancy[square].factor);
 
-            uint64 bishopMagic = findBishopMagicForSquare  (square, &fancy_magic_lookup_table[bishop_magics_fancy[square].position], bishop_magics_fancy[square].factor);
-            assert(bishopMagic == bishop_magics_fancy[square].factor);
-        }
+
         
 
 #if TEST_GPU_PERFT == 1
@@ -3141,32 +3120,26 @@ uint64 getOccCombo(uint64 mask, uint64 i)
     return op;
 }
 
-uint64 findMagicCommon(uint64 occCombos[], uint64 attacks[], uint64 attackTable[], int numCombos, int bits, uint64 preCalculatedMagic = 0)
+uint64 findMagicCommon(uint64 occCombos[], uint64 attacks[], uint64 attackTable[], int numCombos, int bits)
 {
     uint64 magic = 0;
     while(1)
     {
-        if (preCalculatedMagic)
-        {
-            magic = preCalculatedMagic;
-        }
-        else
-        {
-            for (int i=0; i < (1 << bits); i++)
-            {
-                attackTable[i] = 0; // unused entry
-            }
 
-            magic = random_uint64_sparse();
-            //magic = random_uint64();
+        for (int i=0; i < (1 << bits); i++)
+        {
+            attackTable[i] = 0; // unused entry
         }
+
+        magic = random_uint64_sparse();
+        //magic = random_uint64();
 
         // try all possible occupancy combos and check for collisions
         int i = 0;
         for (i = 0; i < numCombos; i++)
         {
             uint64 index = (magic * occCombos[i]) >> (64 - bits);
-            if (preCalculatedMagic || attackTable[index] == 0)
+            if (attackTable[index] == 0)
             {
                 attackTable[index] = attacks[i];
             }
@@ -3180,13 +3153,11 @@ uint64 findMagicCommon(uint64 occCombos[], uint64 attacks[], uint64 attackTable[
 
         if (i == numCombos)
             break;
-        else
-            assert(preCalculatedMagic == 0);
     }
     return magic;
 }
 
-uint64 findRookMagicForSquare(int square, uint64 magicAttackTable[], uint64 preCalculatedMagic)
+uint64 findRookMagicForSquare(int square, uint64 magicAttackTable[])
 {
     uint64 mask = RookAttacksMasked[square];
     uint64 thisSquare = BIT(square);
@@ -3203,11 +3174,11 @@ uint64 findRookMagicForSquare(int square, uint64 magicAttackTable[], uint64 preC
         attacks[i]   = MoveGeneratorBitboard::rookAttacksKoggeStone(thisSquare, ~occCombos[i]);
     }
 
-    return findMagicCommon(occCombos, attacks, magicAttackTable, numCombos, ROOK_MAGIC_BITS, preCalculatedMagic);
+    return findMagicCommon(occCombos, attacks, magicAttackTable, numCombos, ROOK_MAGIC_BITS);
 
 }
 
-uint64 findBishopMagicForSquare(int square, uint64 magicAttackTable[], uint64 preCalculatedMagic)
+uint64 findBishopMagicForSquare(int square, uint64 magicAttackTable[])
 {
     uint64 mask = BishopAttacksMasked[square];
     uint64 thisSquare = BIT(square);
@@ -3224,7 +3195,7 @@ uint64 findBishopMagicForSquare(int square, uint64 magicAttackTable[], uint64 pr
         attacks[i]   = MoveGeneratorBitboard::bishopAttacksKoggeStone(thisSquare, ~occCombos[i]);
     }
 
-    return findMagicCommon(occCombos, attacks, magicAttackTable, numCombos, BISHOP_MAGIC_BITS, preCalculatedMagic);
+    return findMagicCommon(occCombos, attacks, magicAttackTable, numCombos, BISHOP_MAGIC_BITS);
 }
 
 // only for testing

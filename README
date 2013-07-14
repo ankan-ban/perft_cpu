@@ -1,7 +1,13 @@
 Kogge-stone bitboard move generator / perft counter : CPU version
 
+14 Jul 2013: Added magic bitboard support
+Perft speeds (on Core i7 3210M - ivy bridge @ 3.1 Ghz):
+starting position (perft 7): 301 MNps (fancy), 275 MNps (plain)
+position 2 in CPW (perft 5): 542 MNps (fancy), 501 MNps (plain)
+
+Old speeds (with kogge-stone for sliding piece move generation):
 Perft speeds (on Core i7 3210M - ivy bridge @ 3.1 Ghz):
 starting position (perft 7): 195 MNps
 position 2 in CPW (perft 5): 340 MNps
 
-TODO: try magic bitboards for sliding pieces
+

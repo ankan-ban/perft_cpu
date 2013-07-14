@@ -3,8 +3,6 @@
 #include "MoveGenerator088.h"
 #include "MoveGeneratorBitboard.h"
 
-
-
 // for timing CPU code : start
 double gTime;
 #define START_TIMER { \
@@ -52,17 +50,14 @@ int main()
 
     //Utils::readFENString("rnbqkb1r/ppppp1pp/7n/4P3/5p2/3K4/PPPP1PPP/RNBQ1BNR b kq - 0 3", &testBoard); // temp test
 
-    
 
     /*
-    // bug!
-    printf("\nsquares between: %llu\n", MoveGeneratorBitboard::squaresInBetween(G8, B3));
-    printf("\nsquares between: %llu\n", MoveGeneratorBitboard::squaresInBetween(B3, G8));
-
     HexaBitBoardPosition newMoves[MAX_MOVES];
     uint32 bbMoves = MoveGeneratorBitboard::generateMoves(&testBB, newMoves);
-    */
+    */    
     
+    //findMagics();
+
     printf("\nEnter FEN String: \n");
     char fen[1024];
     gets(fen);

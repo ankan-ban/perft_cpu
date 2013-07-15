@@ -3,13 +3,13 @@
 
 unsigned long long fancy_magic_lookup_table[97264];
 
-struct
+struct FancyMagicEntry
 {
     unsigned long long factor;
     int position;
-}
+};
 
-bishop_magics_fancy[64] =
+FancyMagicEntry bishop_magics_fancy[64] =
 {
     { 0x007bfeffbfeffbffull,  16530 },
     { 0x003effbfeffbfe08ull,   9162 },
@@ -75,9 +75,9 @@ bishop_magics_fancy[64] =
     { 0x0000000040408020ull,   9465 },
     { 0x00007ffeffbfeff9ull,  16196 },
     { 0x007ffdff7fdff7fdull,   6166 }
-},
+};
 
-rook_magics_fancy[64] =
+FancyMagicEntry rook_magics_fancy[64] =
 {
     { 0x00a801f7fbfeffffull,  85487 },
     { 0x00180012000bffffull,  43101 },

@@ -38,6 +38,7 @@
 #define USE_KNIGHT_LUT 1
 
 // use lookup table (magics) for sliding moves
+// reduces performance by ~7% for GPU version
 #define USE_SLIDING_LUT 1
 
 // use fancy fixed-shift version - ~ 800 KB lookup tables
@@ -45,6 +46,10 @@
 // plain magics is a bit faster at least for perft (on core 2 duo)
 // fancy magics is clearly faster on more recent processors (ivy bridge)
 #define USE_FANCY_MAGICS 1
+
+// use byte lookup for fancy magics (~150 KB lookup tables)
+// >10% slower than fixed shift fancy magics on both CPU and GPU
+#define USE_BYTE_LOOKUP_FANCY 0
 
 // bit board constants
 #define C64(constantU64) constantU64##ULL
@@ -182,8 +187,9 @@ static uint64 BishopAttacksMasked [64];
 uint64 rookMagicAttackTables      [64][1 << ROOK_MAGIC_BITS  ];    // 2 MB
 uint64 bishopMagicAttackTables    [64][1 << BISHOP_MAGIC_BITS];    // 256 KB
 
-uint64 findRookMagicForSquare(int square, uint64 magicAttackTable[], uint64 magic = 0);
-uint64 findBishopMagicForSquare(int square, uint64 magicAttackTable[], uint64 magic = 0);
+
+uint64 findRookMagicForSquare  (int square, uint64 magicAttackTable[], uint64 magic = 0, uint64 *uniqueAttackTable = NULL, uint8 *byteIndices = NULL, int *numUniqueAttacks = 0);
+uint64 findBishopMagicForSquare(int square, uint64 magicAttackTable[], uint64 magic = 0, uint64 *uniqueAttackTable = NULL, uint8 *byteIndices = NULL, int *numUniqueAttacks = 0);
 
 #if TEST_GPU_PERFT == 1
 // gpu version of the above data structures
@@ -219,7 +225,12 @@ __device__ static uint64 gBishopMagicAttackTables   [64][1 << BISHOP_MAGIC_BITS]
 __device__ static uint64 g_fancy_magic_lookup_table[97264];
 __device__ static FancyMagicEntry g_bishop_magics_fancy[64];
 __device__ static FancyMagicEntry g_rook_magics_fancy[64];
-#endif
+
+// byte lookup fancy magics (cpu versions in FancyMagics.h)
+__device__ static uint8  g_fancy_byte_magic_lookup_table[97264];
+__device__ static uint64 g_fancy_byte_BishopLookup[1428];
+__device__ static uint64 g_fancy_byte_RookLookup[4900];
+#endif // #if TEST_GPU_PERFT == 1
 
 CUDA_CALLABLE_MEMBER __forceinline uint64 sqsInBetweenLUT(uint8 sq1, uint8 sq2)
 {
@@ -342,8 +353,7 @@ CUDA_CALLABLE_MEMBER __forceinline FancyMagicEntry sq_bishop_magics_fancy(int sq
 {
 #ifdef __CUDA_ARCH__
     FancyMagicEntry op;
-    op.factor   = __ldg(&g_bishop_magics_fancy[sq].factor);
-    op.position = __ldg(&g_bishop_magics_fancy[sq].position);
+    op.data = __ldg(&(((uint4 *)g_bishop_magics_fancy)[sq]));
     return op;
 #else
     return bishop_magics_fancy[sq];
@@ -354,11 +364,37 @@ CUDA_CALLABLE_MEMBER __forceinline FancyMagicEntry sq_rook_magics_fancy(int sq)
 {
 #ifdef __CUDA_ARCH__
     FancyMagicEntry op;
-    op.factor   = __ldg(&g_rook_magics_fancy[sq].factor);
-    op.position = __ldg(&g_rook_magics_fancy[sq].position);
+    op.data = __ldg(&(((uint4 *)g_rook_magics_fancy)[sq]));
     return op;
 #else
     return rook_magics_fancy[sq];
+#endif
+}
+
+CUDA_CALLABLE_MEMBER __forceinline uint8 sq_fancy_byte_magic_lookup_table(int index)
+{
+#ifdef __CUDA_ARCH__
+    return __ldg(&g_fancy_byte_magic_lookup_table[index]);
+#else
+    return fancy_byte_magic_lookup_table[index];
+#endif
+}
+
+CUDA_CALLABLE_MEMBER __forceinline uint64 sq_fancy_byte_BishopLookup(int index)
+{
+#ifdef __CUDA_ARCH__
+    return __ldg(&g_fancy_byte_BishopLookup[index]);
+#else
+    return fancy_byte_BishopLookup[index];
+#endif
+}
+
+CUDA_CALLABLE_MEMBER __forceinline uint64 sq_fancy_byte_RookLookup(int index)
+{
+#ifdef __CUDA_ARCH__
+    return __ldg(&g_fancy_byte_RookLookup[index]);
+#else
+    return fancy_byte_RookLookup[index];
 #endif
 }
 
@@ -655,19 +691,32 @@ public:
 #ifdef __CUDA_ARCH__
         FancyMagicEntry magicEntry = sq_bishop_magics_fancy(square);
         int index = (magicEntry.factor * occ) >> (64 - BISHOP_MAGIC_BITS);
+
+#if USE_BYTE_LOOKUP_FANCY == 1
+        int index2 = sq_fancy_byte_magic_lookup_table(magicEntry.position + index) + magicEntry.offset;
+        return sq_fancy_byte_BishopLookup(index2);
+#else // USE_BYTE_LOOKUP_FANCY == 1
         return sq_fancy_magic_lookup_table(magicEntry.position + index);
-#else
+#endif // USE_BYTE_LOOKUP_FANCY == 1
+
+#else // #ifdef __CUDA_ARCH__
         // this version is slightly faster for CPUs.. why ?
         uint64 magic  = bishop_magics_fancy[square].factor;
-        uint64 *table = &fancy_magic_lookup_table[bishop_magics_fancy[square].position];
         uint64 index = (magic * occ) >> (64 - BISHOP_MAGIC_BITS);
+#if USE_BYTE_LOOKUP_FANCY == 1
+        uint8 *table = &fancy_byte_magic_lookup_table[bishop_magics_fancy[square].position];
+        int index2 = table[index] + bishop_magics_fancy[square].offset;
+        return fancy_byte_BishopLookup[index2];
+#else // USE_BYTE_LOOKUP_FANCY == 1
+        uint64 *table = &fancy_magic_lookup_table[bishop_magics_fancy[square].position];
         return table[index];
-#endif
-#else
+#endif // USE_BYTE_LOOKUP_FANCY == 1
+#endif // #ifdef __CUDA_ARCH__
+#else // USE_FANCY_MAGICS == 1
         uint64 magic = sqBishopMagics(square);
         uint64 index = (magic * occ) >> (64 - BISHOP_MAGIC_BITS);
         return sqBishopMagicAttackTables(square, index);
-#endif
+#endif // USE_FANCY_MAGICS == 1
     }
 
     CUDA_CALLABLE_MEMBER __forceinline static uint64 rookAttacks(uint64 rook, uint64 pro)
@@ -679,13 +728,25 @@ public:
 #ifdef __CUDA_ARCH__
         FancyMagicEntry magicEntry = sq_rook_magics_fancy(square);
         int index = (magicEntry.factor * occ) >> (64 - ROOK_MAGIC_BITS);
+#if USE_BYTE_LOOKUP_FANCY == 1
+        int index2 = sq_fancy_byte_magic_lookup_table(magicEntry.position + index) + magicEntry.offset;
+        return sq_fancy_byte_RookLookup(index2);
+#else
         return sq_fancy_magic_lookup_table(magicEntry.position + index);
+#endif
+
 #else
         // this version is slightly faster for CPUs.. why ?
         uint64 magic  = rook_magics_fancy[square].factor;
-        uint64 *table = &fancy_magic_lookup_table[rook_magics_fancy[square].position];
         uint64 index = (magic * occ) >> (64 - ROOK_MAGIC_BITS);
+#if USE_BYTE_LOOKUP_FANCY == 1
+        uint8 *table = &fancy_byte_magic_lookup_table[rook_magics_fancy[square].position];
+        int index2 = table[index] + rook_magics_fancy[square].offset;
+        return fancy_byte_RookLookup[index2];
+#else
+        uint64 *table = &fancy_magic_lookup_table[rook_magics_fancy[square].position];
         return table[index];
+#endif
 #endif
 #else
         uint64 magic = sqRookMagics(square);
@@ -930,14 +991,31 @@ public:
         }
 
         // initialize fancy magic lookup table
+        memset(fancy_magic_lookup_table, 0, sizeof(fancy_magic_lookup_table));
+        int globalOffsetRook = 0;
+        int globalOffsetBishop = 0;
+
         for (int square = A1; square <= H8; square++)
         {
-            uint64 rookMagic = findRookMagicForSquare  (square, &fancy_magic_lookup_table[rook_magics_fancy[square].position], rook_magics_fancy[square].factor);
+            int uniqueBishopAttacks = 0, uniqueRookAttacks=0;
+
+            uint64 rookMagic = findRookMagicForSquare  (square, &fancy_magic_lookup_table[rook_magics_fancy[square].position], rook_magics_fancy[square].factor, 
+                                                        &fancy_byte_RookLookup[globalOffsetRook], &fancy_byte_magic_lookup_table[rook_magics_fancy[square].position], &uniqueRookAttacks);
             assert(rookMagic == rook_magics_fancy[square].factor);
 
-            uint64 bishopMagic = findBishopMagicForSquare  (square, &fancy_magic_lookup_table[bishop_magics_fancy[square].position], bishop_magics_fancy[square].factor);
+            uint64 bishopMagic = findBishopMagicForSquare  (square, &fancy_magic_lookup_table[bishop_magics_fancy[square].position], bishop_magics_fancy[square].factor, 
+                                                           &fancy_byte_BishopLookup[globalOffsetBishop], &fancy_byte_magic_lookup_table[bishop_magics_fancy[square].position], &uniqueBishopAttacks);
             assert(bishopMagic == bishop_magics_fancy[square].factor);
+
+            rook_magics_fancy  [square].offset = globalOffsetRook;
+            globalOffsetRook += uniqueRookAttacks;
+
+            bishop_magics_fancy[square].offset = globalOffsetBishop;
+            globalOffsetBishop += uniqueBishopAttacks;
         }
+
+        printf("\ntotal bishop unique attacks: %d\n", globalOffsetBishop);
+        printf("\ntotal rook unique attacks: %d\n", globalOffsetRook);
 #endif        
 
 #if TEST_GPU_PERFT == 1
@@ -990,8 +1068,16 @@ public:
 
         err = cudaMemcpyToSymbol(g_rook_magics_fancy, rook_magics_fancy, sizeof(rook_magics_fancy));
         if (err != S_OK) printf("For copying rook_magics_fancy, Err id: %d, str: %s\n", err, cudaGetErrorString(err));  
-#endif
 
+        err = cudaMemcpyToSymbol(g_fancy_byte_magic_lookup_table, fancy_byte_magic_lookup_table, sizeof(fancy_byte_magic_lookup_table));
+        if (err != S_OK) printf("For copying fancy_byte_magic_lookup_table, Err id: %d, str: %s\n", err, cudaGetErrorString(err));  
+        
+        err = cudaMemcpyToSymbol(g_fancy_byte_BishopLookup, fancy_byte_BishopLookup, sizeof(fancy_byte_BishopLookup));
+        if (err != S_OK) printf("For copying fancy_byte_BishopLookup, Err id: %d, str: %s\n", err, cudaGetErrorString(err));  
+
+        err = cudaMemcpyToSymbol(g_fancy_byte_RookLookup, fancy_byte_RookLookup, sizeof(fancy_byte_RookLookup));
+        if (err != S_OK) printf("For copying fancy_byte_RookLookup, Err id: %d, str: %s\n", err, cudaGetErrorString(err));  
+#endif		
     }
 
 
@@ -3287,7 +3373,7 @@ uint64 getOccCombo(uint64 mask, uint64 i)
     return op;
 }
 
-uint64 findMagicCommon(uint64 occCombos[], uint64 attacks[], uint64 attackTable[], int numCombos, int bits, uint64 preCalculatedMagic = 0)
+uint64 findMagicCommon(uint64 occCombos[], uint64 attacks[], uint64 attackTable[], int numCombos, int bits, uint64 preCalculatedMagic = 0, uint64 *uniqueAttackTable = NULL, uint8 *byteIndices = NULL, int *numUniqueAttacks = NULL)
 {
     uint64 magic = 0;
     while(1)
@@ -3312,9 +3398,33 @@ uint64 findMagicCommon(uint64 occCombos[], uint64 attacks[], uint64 attackTable[
         for (i = 0; i < numCombos; i++)
         {
             uint64 index = (magic * occCombos[i]) >> (64 - bits);
-            if (preCalculatedMagic || attackTable[index] == 0)
+            if (attackTable[index] == 0)
             {
-                attackTable[index] = attacks[i];
+                uint64 attackSet = attacks[i];
+                attackTable[index] = attackSet;
+
+                // fill in the byte lookup table also
+                if (numUniqueAttacks)
+                {
+                    // search if this attack set is already present in uniqueAttackTable
+                    int j = 0;
+                    for (j = 0; j < *numUniqueAttacks; j++)
+                    {
+                        if (uniqueAttackTable[j] == attackSet)
+                        {
+                            byteIndices[index] = j;
+                            break;
+                        }
+                    }
+
+                    // add new unique attack entry if not found
+                    if (j == *numUniqueAttacks)
+                    {
+                        uniqueAttackTable[*numUniqueAttacks] = attackSet;
+                        byteIndices[index] = *numUniqueAttacks;
+                        (*numUniqueAttacks)++;
+                    }
+                }
             }
             else
             {
@@ -3332,7 +3442,7 @@ uint64 findMagicCommon(uint64 occCombos[], uint64 attacks[], uint64 attackTable[
     return magic;
 }
 
-uint64 findRookMagicForSquare(int square, uint64 magicAttackTable[], uint64 preCalculatedMagic)
+uint64 findRookMagicForSquare(int square, uint64 magicAttackTable[], uint64 preCalculatedMagic, uint64 *uniqueAttackTable, uint8 *byteIndices, int *numUniqueAttacks)
 {
     uint64 mask = RookAttacksMasked[square];
     uint64 thisSquare = BIT(square);
@@ -3349,11 +3459,11 @@ uint64 findRookMagicForSquare(int square, uint64 magicAttackTable[], uint64 preC
         attacks[i]   = MoveGeneratorBitboard::rookAttacksKoggeStone(thisSquare, ~occCombos[i]);
     }
 
-    return findMagicCommon(occCombos, attacks, magicAttackTable, numCombos, ROOK_MAGIC_BITS, preCalculatedMagic);
+    return findMagicCommon(occCombos, attacks, magicAttackTable, numCombos, ROOK_MAGIC_BITS, preCalculatedMagic, uniqueAttackTable, byteIndices, numUniqueAttacks);
 
 }
 
-uint64 findBishopMagicForSquare(int square, uint64 magicAttackTable[], uint64 preCalculatedMagic)
+uint64 findBishopMagicForSquare(int square, uint64 magicAttackTable[], uint64 preCalculatedMagic, uint64 *uniqueAttackTable, uint8 *byteIndices, int *numUniqueAttacks)
 {
     uint64 mask = BishopAttacksMasked[square];
     uint64 thisSquare = BIT(square);
@@ -3370,7 +3480,7 @@ uint64 findBishopMagicForSquare(int square, uint64 magicAttackTable[], uint64 pr
         attacks[i]   = MoveGeneratorBitboard::bishopAttacksKoggeStone(thisSquare, ~occCombos[i]);
     }
 
-    return findMagicCommon(occCombos, attacks, magicAttackTable, numCombos, BISHOP_MAGIC_BITS, preCalculatedMagic);
+    return findMagicCommon(occCombos, attacks, magicAttackTable, numCombos, BISHOP_MAGIC_BITS, preCalculatedMagic, uniqueAttackTable, byteIndices, numUniqueAttacks);
 }
 
 // only for testing

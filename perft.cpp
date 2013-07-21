@@ -70,7 +70,7 @@ int main()
 
 
     int minDepth = 1;
-    int maxDepth = 10;
+    int maxDepth = 20;
 
     uint64 bbMoves;
 
@@ -86,5 +86,6 @@ int main()
         printf("Time taken: %g seconds, nps: %llu\n", gTime/1000.0, (uint64) ((bbMoves/gTime)*1000.0));
     }
     
+    MoveGeneratorBitboard::destroy();
     return 0;
 }

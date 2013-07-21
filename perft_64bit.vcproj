@@ -334,6 +334,10 @@
 				>
 			</File>
 			<File
+				RelativePath=".\randoms.h"
+				>
+			</File>
+			<File
 				RelativePath=".\UciInterface.cpp"
 				>
 			</File>

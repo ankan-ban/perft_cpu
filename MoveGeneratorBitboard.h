@@ -1,5 +1,6 @@
 #include "chess.h"
 #include "FancyMagics.h"
+#include "randoms.h"
 #include <intrin.h>
 #include <time.h>
 
@@ -8,6 +9,26 @@
     #define DEBUG_PRINT_DEPTH 6
     bool printMoves = false;
 #endif
+
+
+// make use of a hash table to avoid duplicate calculations due to transpositions
+#define USE_TRANSPOSITION_TABLE 1
+
+// make use of transposition table even at the leaves
+#define USE_TRANSPOSITION_AT_LEAVES 0
+
+// size of transposition table (in number of entries)
+// must be a power of two
+// each entry is of 16 bytes
+// 27 bits: 128 million entries -> 2 GB hash table
+#define TT_BITS     27                    
+#define TT_SIZE     (1 << TT_BITS)
+
+// bits of the zobrist hash used as index into the transposition table
+#define TT_INDEX_BITS  (TT_SIZE - 1)
+
+// remaining bits (that are stored per hash entry)
+#define TT_HASH_BITS   (ALLSET ^ TT_INDEX_BITS)
 
 // first add moves to a move list and then use makeMove function to update the board
 // when this is set to 0, generateBoards is called to generate the updated boards directly
@@ -190,6 +211,11 @@ uint64 bishopMagicAttackTables    [64][1 << BISHOP_MAGIC_BITS];    // 256 KB
 
 uint64 findRookMagicForSquare  (int square, uint64 magicAttackTable[], uint64 magic = 0, uint64 *uniqueAttackTable = NULL, uint8 *byteIndices = NULL, int *numUniqueAttacks = 0);
 uint64 findBishopMagicForSquare(int square, uint64 magicAttackTable[], uint64 magic = 0, uint64 *uniqueAttackTable = NULL, uint8 *byteIndices = NULL, int *numUniqueAttacks = 0);
+
+// set of random numbers for zobrist hashing
+static ZobristRandoms zob;
+
+static HashEntryPerft *TranspositionTable;
 
 #if TEST_GPU_PERFT == 1
 // gpu version of the above data structures
@@ -923,6 +949,17 @@ public:
 
     static void init()
     {
+        // initialize zobrist keys
+        memcpy(&zob, &randoms[0], sizeof(zob));
+
+        // allocate the transposition table
+        TranspositionTable = (HashEntryPerft *) malloc(TT_SIZE * sizeof(HashEntryPerft));
+        if (TranspositionTable == NULL)
+        {
+            printf("\nFailed to allocate transposition table of %d bytes\n", TT_SIZE * sizeof(HashEntryPerft));
+        }
+        memset(TranspositionTable, 0, TT_SIZE * sizeof(HashEntryPerft));
+
         // initialize the empty board attack tables
         for (uint8 i=0; i < 64; i++)
         {
@@ -1078,6 +1115,11 @@ public:
         err = cudaMemcpyToSymbol(g_fancy_byte_RookLookup, fancy_byte_RookLookup, sizeof(fancy_byte_RookLookup));
         if (err != S_OK) printf("For copying fancy_byte_RookLookup, Err id: %d, str: %s\n", err, cudaGetErrorString(err));  
 #endif		
+    }
+
+    static void destroy()
+    {
+        free(TranspositionTable);
     }
 
 
@@ -3341,6 +3383,77 @@ public:
 };
 
 
+// compute zobrist hash key for a given board position
+uint64 computeZobristKey(HexaBitBoardPosition *pos)
+{
+    uint64 key = 0;
+
+    // chance (side to move)
+    if (pos->chance == WHITE)
+        key ^= zob.chance;
+
+    // castling rights
+    if (pos->whiteCastle & CASTLE_FLAG_KING_SIDE)
+        key ^= zob.castlingRights[WHITE][0];
+    if (pos->whiteCastle & CASTLE_FLAG_QUEEN_SIDE)
+        key ^= zob.castlingRights[WHITE][1];
+
+    if (pos->blackCastle & CASTLE_FLAG_KING_SIDE)
+        key ^= zob.castlingRights[BLACK][0];
+    if (pos->blackCastle & CASTLE_FLAG_QUEEN_SIDE)
+        key ^= zob.castlingRights[BLACK][1];
+
+
+    // en-passent target
+    if (pos->enPassent)
+    {
+        key ^= zob.enPassentTarget[pos->enPassent - 1];
+    }
+    
+
+    // piece-position
+    uint64 allPawns     = pos->pawns & RANKS2TO7;    // get rid of game state variables
+    uint64 allPieces    = pos->kings |  allPawns | pos->knights | pos->bishopQueens | pos->rookQueens;
+    uint64 blackPieces  = allPieces & (~pos->whitePieces);
+
+    while(allPieces)
+    {
+        uint64 piece = MoveGeneratorBitboard::getOne(allPieces);
+        int square = bitScan(piece);
+        
+        int color = !!(piece & blackPieces);
+        if (piece & allPawns)
+        {
+            key ^= zob.pieces[color][ZOB_INDEX_PAWN][square];
+        }
+        else if (piece & pos->kings)
+        {
+            key ^= zob.pieces[color][ZOB_INDEX_KING][square];
+        }
+        else if (piece & pos->knights)
+        {
+            key ^= zob.pieces[color][ZOB_INDEX_KNIGHT][square];
+        }
+        else if (piece & pos->rookQueens & pos->bishopQueens)
+        {
+            key ^= zob.pieces[color][ZOB_INDEX_QUEEN][square];
+        }
+        else if (piece & pos->rookQueens)
+        {
+            key ^= zob.pieces[color][ZOB_INDEX_ROOK][square];
+        }
+        else if (piece & pos->bishopQueens)
+        {
+            key ^= zob.pieces[color][ZOB_INDEX_BISHOP][square];
+        }
+
+        allPieces ^= piece;
+    }
+
+    return key;
+}
+
+
 // random generators and basic idea of finding magics taken from:
 // http://chessprogramming.wikispaces.com/Looking+for+Magics 
 
@@ -3628,6 +3741,9 @@ uint64 perft_bb(HexaBitBoardPosition *pos, uint32 depth)
 
 }
 #else
+
+uint64 globalHitCounter = 0;
+
 uint64 perft_bb(HexaBitBoardPosition *pos, uint32 depth)
 {
     HexaBitBoardPosition newPositions[MAX_MOVES];
@@ -3645,6 +3761,19 @@ uint64 perft_bb(HexaBitBoardPosition *pos, uint32 depth)
 #if USE_COUNT_ONLY_OPT == 1
     if (depth == 1)
     {
+
+#if USE_TRANSPOSITION_AT_LEAVES == 1
+        uint64 hash = computeZobristKey(pos);
+        hash ^= zob.depth * depth;
+
+        // look-up the transposition table for a match
+        HashEntryPerft entry = TranspositionTable[hash & (TT_INDEX_BITS)];
+        if ((entry.hashKey & TT_HASH_BITS) == (hash & TT_HASH_BITS))
+        {
+            return entry.perftVal;
+        }
+#endif
+
 #if USE_TEMPLATE_CHANCE_OPT == 1
         if (chance == BLACK)
         {
@@ -3656,6 +3785,16 @@ uint64 perft_bb(HexaBitBoardPosition *pos, uint32 depth)
         }
 #else
         nMoves = MoveGeneratorBitboard::countMoves(pos, chance);
+#endif
+
+#if USE_TRANSPOSITION_AT_LEAVES == 1
+        if (entry.depth <= depth)
+        {
+            entry.perftVal = nMoves;
+            entry.hashKey = hash;
+            entry.depth = depth;
+            TranspositionTable[hash & (TT_INDEX_BITS)] = entry;
+        }
 #endif
         return nMoves;
     }
@@ -3679,6 +3818,24 @@ uint64 perft_bb(HexaBitBoardPosition *pos, uint32 depth)
         return nMoves;
 #endif
 
+#if USE_TRANSPOSITION_TABLE == 1
+    uint64 hash;
+    HashEntryPerft entry;
+
+    //if (depth > 2)
+    {
+        hash = computeZobristKey(pos);
+        hash ^= zob.depth * depth;
+
+        // look-up the transposition table for a match
+        entry = TranspositionTable[hash & (TT_INDEX_BITS)];
+        if ((entry.hashKey & TT_HASH_BITS) == (hash & TT_HASH_BITS))
+        {
+            return entry.perftVal;
+        }
+    }
+#endif
+
     uint64 count = 0;
 
     for (uint32 i=0; i < nMoves; i++)
@@ -3691,6 +3848,16 @@ uint64 perft_bb(HexaBitBoardPosition *pos, uint32 depth)
         count += childPerft;
     }
 
+#if USE_TRANSPOSITION_TABLE == 1
+    // only replace hash table entry if previously stored entry is at shallower depth
+    if (/*depth > 2 &&*/ entry.depth <= depth)
+    {
+        entry.perftVal = count;
+        entry.hashKey = hash;
+        entry.depth = depth;
+        TranspositionTable[hash & (TT_INDEX_BITS)] = entry;
+    }
+#endif
     return count;
 }
 #endif

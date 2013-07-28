@@ -6,7 +6,7 @@
 
 #define DEBUG_PRINT_MOVES 0
 #if DEBUG_PRINT_MOVES == 1
-    #define DEBUG_PRINT_DEPTH 6
+    #define DEBUG_PRINT_DEPTH 11
     bool printMoves = false;
 #endif
 
@@ -23,7 +23,7 @@
 
 // incrementally calculate zobrist hash when making a move / generating a board
 // currently only works with move list (when USE_MOVE_LIST == 1)
-#define INCREMENTAL_ZOBRIST_UPDATE 1
+#define INCREMENTAL_ZOBRIST_UPDATE 0
 
 // store two positions (most recent and deepest) in every entry of hash table
 #define USE_DUAL_SLOT_TT 1
@@ -3543,14 +3543,13 @@ uint64 computeZobristKey(HexaBitBoardPosition *pos)
     // piece-position
     uint64 allPawns     = pos->pawns & RANKS2TO7;    // get rid of game state variables
     uint64 allPieces    = pos->kings |  allPawns | pos->knights | pos->bishopQueens | pos->rookQueens;
-    uint64 blackPieces  = allPieces & (~pos->whitePieces);
 
     while(allPieces)
     {
         uint64 piece = MoveGeneratorBitboard::getOne(allPieces);
         int square = bitScan(piece);
         
-        int color = !!(piece & blackPieces);
+        int color = !(piece & pos->whitePieces);
         if (piece & allPawns)
         {
             key ^= zob.pieces[color][ZOB_INDEX_PAWN][square];
@@ -3913,7 +3912,7 @@ __forceinline bool searchTTEntry(TT_Entry &entry, uint64 hash, uint64 *perft)
     return false;
 }
 
-__forceinline void storeTTEntry(TT_Entry &entry, uint64 hash, int depth, int count)
+__forceinline void storeTTEntry(TT_Entry &entry, uint64 hash, int depth, uint64 count, HexaBitBoardPosition *pos)
 {
 #if USE_DUAL_SLOT_TT == 1
 
@@ -3929,6 +3928,7 @@ __forceinline void storeTTEntry(TT_Entry &entry, uint64 hash, int depth, int cou
         entry.deepest.perftVal = count;
         entry.deepest.hashKey = hash;
         entry.deepest.depth = depth;
+        TranspositionTable[hash & (TT_INDEX_BITS)] = entry;
     }
     else
     {
@@ -3936,6 +3936,7 @@ __forceinline void storeTTEntry(TT_Entry &entry, uint64 hash, int depth, int cou
         entry.mostRecent.perftVal = count;
         entry.mostRecent.hashKey = hash;
         entry.mostRecent.depth = depth;
+        TranspositionTable[hash & (TT_INDEX_BITS)] = entry;
     }
 #else
     // only replace hash table entry if previously stored entry is at shallower depth
@@ -3944,9 +3945,12 @@ __forceinline void storeTTEntry(TT_Entry &entry, uint64 hash, int depth, int cou
         entry.perftVal = count;
         entry.hashKey = hash;
         entry.depth = depth;
+#if DEBUG_CATCH_HASH_COLLISIONS == 1
+        entry.pos = *pos;
+#endif
+        TranspositionTable[hash & (TT_INDEX_BITS)] = entry;
     }
 #endif
-    TranspositionTable[hash & (TT_INDEX_BITS)] = entry;
 }
 #endif
 
@@ -4091,9 +4095,29 @@ uint64 perft_bb(HexaBitBoardPosition *pos, uint32 depth)
 
     // look-up the transposition table for a match
     entry = lookupTT(hash);
-    uint64 perftVal;
+    uint64 perftVal = 0;
     if (searchTTEntry(entry, hash, &perftVal))
     {
+#if DEBUG_CATCH_HASH_COLLISIONS == 1
+        if (entry.depth != depth)
+        {
+            printf("got collision due to depth!\n");
+            BoardPosition testBoard;
+            Utils::boardHexBBTo088(&testBoard, pos);
+            Utils::dispBoard(&testBoard);
+        }
+        if (memcmp(&entry.pos, pos, sizeof(entry.pos)))
+        {
+            printf("got collision!\n");
+            BoardPosition testBoard;
+
+            Utils::boardHexBBTo088(&testBoard, &entry.pos);
+            Utils::dispBoard(&testBoard);
+
+            Utils::boardHexBBTo088(&testBoard, pos);
+            Utils::dispBoard(&testBoard);
+        }
+#endif
         return perftVal;
     }
 #endif
@@ -4110,8 +4134,15 @@ uint64 perft_bb(HexaBitBoardPosition *pos, uint32 depth)
         count += childPerft;
     }
 
+    /*
+    if (perftVal && perftVal != count)
+    {
+        printf("\nfound mismatch at depth: %d, hash val: %llu, calculated val: %llu", depth, perftVal, count);
+    }
+    */
+
 #if USE_TRANSPOSITION_TABLE == 1
-    storeTTEntry(entry, hash, depth, count);
+    storeTTEntry(entry, hash, depth, count, pos);
 #endif
     return count;
 }

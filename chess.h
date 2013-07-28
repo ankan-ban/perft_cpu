@@ -225,10 +225,10 @@ struct HexaBitBoardPosition
 
     // TODO: might want to keep it seperately
     // currently we always calculate the zobrist key from scratch!
-    uint64   zobristHash;
+    //uint64   zobristHash;
 };
-//CT_ASSERT(sizeof(HexaBitBoardPosition) == 48);
-CT_ASSERT(sizeof(HexaBitBoardPosition) == 56);
+CT_ASSERT(sizeof(HexaBitBoardPosition) == 48);
+//CT_ASSERT(sizeof(HexaBitBoardPosition) == 56);
 
 // a more compact move structure (16 bit)
 // from http://chessprogramming.wikispaces.com/Encoding+Moves
@@ -339,6 +339,8 @@ struct ZobristRandoms
 #define ZOB_INDEX_QUEEN    (QUEEN - 1 )
 #define ZOB_INDEX_KING     (KING - 1  )
 
+// detect hash collisions
+#define DEBUG_CATCH_HASH_COLLISIONS 0
 
 // hash table entry for Perft
 struct HashEntryPerft
@@ -355,7 +357,11 @@ struct HashEntryPerft
         };
     };
     uint64 perftVal;
+#if DEBUG_CATCH_HASH_COLLISIONS == 1
+    HexaBitBoardPosition pos;       // a copy of the position for which has was calculated
+#endif
 };
+
 CT_ASSERT(sizeof(HashEntryPerft) == 16);
 
 // Paul B's method of storing two entries per slot of hash table

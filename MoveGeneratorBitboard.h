@@ -10,9 +10,23 @@
     bool printMoves = false;
 #endif
 
+// show how much time is spent where
+#define DEBUG_PRINT_TIME_BREAKUP 0
+
+// show how many times countmoves got called (useful for testing TT usefulness)
+#define DEBUG_PRINT_UNIQUE_COUNTMOVES 0
 
 // make use of a hash table to avoid duplicate calculations due to transpositions
 #define USE_TRANSPOSITION_TABLE 1
+
+#if USE_TRANSPOSITION_TABLE == 1
+
+// incrementally calculate zobrist hash when making a move / generating a board
+// currently only works with move list (when USE_MOVE_LIST == 1)
+#define INCREMENTAL_ZOBRIST_UPDATE 1
+
+// store two positions (most recent and deepest) in every entry of hash table
+#define USE_DUAL_SLOT_TT 1
 
 // make use of transposition table even at the leaves
 #define USE_TRANSPOSITION_AT_LEAVES 0
@@ -21,7 +35,7 @@
 // must be a power of two
 // each entry is of 16 bytes
 // 27 bits: 128 million entries -> 2 GB hash table
-#define TT_BITS     27                    
+#define TT_BITS     26
 #define TT_SIZE     (1 << TT_BITS)
 
 // bits of the zobrist hash used as index into the transposition table
@@ -29,6 +43,9 @@
 
 // remaining bits (that are stored per hash entry)
 #define TT_HASH_BITS   (ALLSET ^ TT_INDEX_BITS)
+
+
+#endif
 
 // first add moves to a move list and then use makeMove function to update the board
 // when this is set to 0, generateBoards is called to generate the updated boards directly
@@ -48,6 +65,9 @@
 
 // intel core 2 doesn't have popcnt instruction
 #define USE_POPCNT 0
+
+// pentium 4 doesn't have fast HW bitscan
+#define USE_HW_BITSCAN 1
 
 // use lookup tabls for figuring out squares in line and squares in between
 #define USE_IN_BETWEEN_LUT 1
@@ -163,6 +183,7 @@ CUDA_CALLABLE_MEMBER __forceinline uint8 bitScan(uint64 x)
    _BitScanForward64(&index, x);
    return (uint8) index;    
 #else
+#if USE_HW_BITSCAN == 1
     uint32 lo = (uint32)  x;
     uint32 hi = (uint32) (x >> 32);
     DWORD id; 
@@ -176,6 +197,21 @@ CUDA_CALLABLE_MEMBER __forceinline uint8 bitScan(uint64 x)
     }
 
     return (uint8) id; 
+#else
+    const int index64[64] = {
+        0,  1, 48,  2, 57, 49, 28,  3,
+       61, 58, 50, 42, 38, 29, 17,  4,
+       62, 55, 59, 36, 53, 51, 43, 22,
+       45, 39, 33, 30, 24, 18, 12,  5,
+       63, 47, 56, 27, 60, 41, 37, 16,
+       54, 35, 52, 21, 44, 32, 23, 11,
+       46, 26, 40, 15, 34, 20, 31, 10,
+       25, 14, 19,  9, 13,  8,  7,  6
+    };
+    const uint64 debruijn64 = C64(0x03f79d71b4cb0a89);
+    assert (x != 0);
+    return index64[((x & -x) * debruijn64) >> 58];         
+#endif
 #endif
 }
 
@@ -215,7 +251,13 @@ uint64 findBishopMagicForSquare(int square, uint64 magicAttackTable[], uint64 ma
 // set of random numbers for zobrist hashing
 static ZobristRandoms zob;
 
-static HashEntryPerft *TranspositionTable;
+#if USE_DUAL_SLOT_TT == 1
+#define TT_Entry DualHashEntry
+#else
+#define TT_Entry HashEntryPerft
+#endif
+
+static TT_Entry *TranspositionTable;
 
 #if TEST_GPU_PERFT == 1
 // gpu version of the above data structures
@@ -950,15 +992,17 @@ public:
     static void init()
     {
         // initialize zobrist keys
-        memcpy(&zob, &randoms[0], sizeof(zob));
+        memcpy(&zob, &randoms[777], sizeof(zob));
 
         // allocate the transposition table
-        TranspositionTable = (HashEntryPerft *) malloc(TT_SIZE * sizeof(HashEntryPerft));
+#if USE_TRANSPOSITION_TABLE == 1
+        TranspositionTable = (TT_Entry *) malloc(TT_SIZE * sizeof(TT_Entry));
         if (TranspositionTable == NULL)
         {
-            printf("\nFailed to allocate transposition table of %d bytes\n", TT_SIZE * sizeof(HashEntryPerft));
+            printf("\nFailed to allocate transposition table of %d bytes\n", TT_SIZE * sizeof(TT_Entry));
         }
-        memset(TranspositionTable, 0, TT_SIZE * sizeof(HashEntryPerft));
+        memset(TranspositionTable, 0, TT_SIZE * sizeof(TT_Entry));
+#endif 
 
         // initialize the empty board attack tables
         for (uint8 i=0; i < 64; i++)
@@ -2785,6 +2829,10 @@ public:
         else
             piece = ROOK;
 
+#if INCREMENTAL_ZOBRIST_UPDATE == 1
+        // remove moving piece from source
+        pos->zobristHash ^= zob.pieces[chance][piece - 1][move.getFrom()];
+#endif
 
         // promote the pawn (if this was promotion move)
         if (move.getFlags() == CM_FLAG_KNIGHT_PROMOTION || move.getFlags() == CM_FLAG_KNIGHT_PROMO_CAP)
@@ -2795,6 +2843,7 @@ public:
             piece = ROOK;
         else if (move.getFlags() == CM_FLAG_QUEEN_PROMOTION || move.getFlags() == CM_FLAG_QUEEN_PROMO_CAP)
             piece = QUEEN;
+
 
         // remove source from all bitboards
         pos->bishopQueens &= ~src;
@@ -2809,6 +2858,54 @@ public:
         pos->kings        &= ~dst;
         pos->knights      &= ~dst;
         pos->pawns        &= ~(dst & RANKS2TO7);
+
+#if INCREMENTAL_ZOBRIST_UPDATE == 1
+        // remove captured piece from dst
+        if (dst)
+        {
+            uint8 dstPiece = 0;
+            // figure out destination piece
+            if (pos->kings & dst)
+                dstPiece = KING;
+            else if (pos->knights & dst)
+                dstPiece = KNIGHT;
+            else if ((pos->pawns & RANKS2TO7) & dst)
+                dstPiece = PAWN;
+            else if (queens & dst)
+                dstPiece = QUEEN;
+            else if (pos->bishopQueens & dst)
+                dstPiece = BISHOP;
+            else
+                dstPiece = ROOK;            
+
+            pos->zobristHash ^= zob.pieces[chance][dstPiece - 1][move.getTo()];
+        }
+
+        // add moving piece at dst
+        pos->zobristHash ^= zob.pieces[chance][piece - 1][move.getTo()];
+
+        // flip color
+        pos->zobristHash ^= zob.chance;
+
+        // clear special move flags
+        // castling rights
+        if (pos->whiteCastle & CASTLE_FLAG_KING_SIDE)
+            pos->zobristHash ^= zob.castlingRights[WHITE][0];
+        if (pos->whiteCastle & CASTLE_FLAG_QUEEN_SIDE)
+            pos->zobristHash ^= zob.castlingRights[WHITE][1];
+
+        if (pos->blackCastle & CASTLE_FLAG_KING_SIDE)
+            pos->zobristHash ^= zob.castlingRights[BLACK][0];
+        if (pos->blackCastle & CASTLE_FLAG_QUEEN_SIDE)
+            pos->zobristHash ^= zob.castlingRights[BLACK][1];
+
+
+        // en-passent target
+        if (pos->enPassent)
+        {
+            pos->zobristHash ^= zob.enPassentTarget[pos->enPassent - 1];
+        }
+#endif
 
         // put the piece that moved in the required bitboards
         if (piece == KING)
@@ -2900,6 +2997,28 @@ public:
         {
             pos->enPassent = (move.getFrom() & 7) + 1;      // store file + 1
         }
+
+#if INCREMENTAL_ZOBRIST_UPDATE == 1
+        // add special move flags
+        // castling rights
+        if (pos->whiteCastle & CASTLE_FLAG_KING_SIDE)
+            pos->zobristHash ^= zob.castlingRights[WHITE][0];
+        if (pos->whiteCastle & CASTLE_FLAG_QUEEN_SIDE)
+            pos->zobristHash ^= zob.castlingRights[WHITE][1];
+
+        if (pos->blackCastle & CASTLE_FLAG_KING_SIDE)
+            pos->zobristHash ^= zob.castlingRights[BLACK][0];
+        if (pos->blackCastle & CASTLE_FLAG_QUEEN_SIDE)
+            pos->zobristHash ^= zob.castlingRights[BLACK][1];
+
+
+        // en-passent target
+        if (pos->enPassent)
+        {
+            pos->zobristHash ^= zob.enPassentTarget[pos->enPassent - 1];
+        }
+#endif
+
     }
 
 #if USE_TEMPLATE_CHANCE_OPT == 1
@@ -3382,10 +3501,20 @@ public:
     }
 };
 
+#if DEBUG_PRINT_TIME_BREAKUP == 1
+LARGE_INTEGER total_time_in_zob = {0};
+LARGE_INTEGER total_time_in_countMoves = {0};
+LARGE_INTEGER total_time_in_makeMove = {0};
+#endif
 
 // compute zobrist hash key for a given board position
 uint64 computeZobristKey(HexaBitBoardPosition *pos)
 {
+#if DEBUG_PRINT_TIME_BREAKUP == 1
+    LARGE_INTEGER count1, count2;
+    QueryPerformanceCounter(&count1);    
+#endif
+
     uint64 key = 0;
 
     // chance (side to move)
@@ -3449,6 +3578,12 @@ uint64 computeZobristKey(HexaBitBoardPosition *pos)
 
         allPieces ^= piece;
     }
+
+
+#if DEBUG_PRINT_TIME_BREAKUP == 1
+    QueryPerformanceCounter(&count2);
+    total_time_in_zob.QuadPart += (count2.QuadPart - count1.QuadPart);    
+#endif
 
     return key;
 }
@@ -3635,38 +3770,70 @@ void findMagics()
 }
 #endif
 
+#if DEBUG_PRINT_UNIQUE_COUNTMOVES == 1
+uint64 globalCountMovesCounter = 0;
+#endif
 
-
-
-
-
-// perft counter function. Returns perft of the given board for given depth
-#if USE_MOVE_LIST == 1
-uint64 perft_bb(HexaBitBoardPosition *pos, uint32 depth)
+// perft helper functions
+uint32 countMoves(HexaBitBoardPosition *pos)
 {
-    CMove genMoves[MAX_MOVES];
-    uint32 nMoves = 0;
-    uint8 chance = pos->chance;
+    uint32 nMoves;
+#if DEBUG_PRINT_UNIQUE_COUNTMOVES == 1
+    globalCountMovesCounter++;
+#endif
 
-#if USE_COUNT_ONLY_OPT == 1
-    if (depth == 1)
-    {
+#if DEBUG_PRINT_TIME_BREAKUP == 1
+    LARGE_INTEGER count1, count2;
+    QueryPerformanceCounter(&count1);    
+#endif
+
+    int chance = pos->chance;
+
 #if USE_TEMPLATE_CHANCE_OPT == 1
-        if (chance == BLACK)
-        {
-            nMoves = MoveGeneratorBitboard::countMoves<BLACK>(pos);
-        }
-        else
-        {
-            nMoves = MoveGeneratorBitboard::countMoves<WHITE>(pos);
-        }
-#else
-        nMoves = MoveGeneratorBitboard::countMoves(pos, chance);
-#endif
-        return nMoves;
+    if (chance == BLACK)
+    {
+        nMoves = MoveGeneratorBitboard::countMoves<BLACK>(pos);
     }
+    else
+    {
+        nMoves = MoveGeneratorBitboard::countMoves<WHITE>(pos);
+    }
+#else
+    nMoves = MoveGeneratorBitboard::countMoves(pos, chance);
 #endif
 
+#if DEBUG_PRINT_TIME_BREAKUP == 1
+    QueryPerformanceCounter(&count2);
+    total_time_in_countMoves.QuadPart += (count2.QuadPart - count1.QuadPart);    
+#endif
+
+    return nMoves;
+}
+
+uint32 generateBoards(HexaBitBoardPosition *pos, HexaBitBoardPosition *newPositions)
+{
+    uint32 nMoves;
+    int chance = pos->chance;
+#if USE_TEMPLATE_CHANCE_OPT == 1
+    if (chance == BLACK)
+    {
+        nMoves = MoveGeneratorBitboard::generateBoards<BLACK>(pos, newPositions);
+    }
+    else
+    {
+        nMoves = MoveGeneratorBitboard::generateBoards<WHITE>(pos, newPositions);
+    }
+#else
+    nMoves = MoveGeneratorBitboard::generateBoards(pos, newPositions, chance);
+#endif
+   
+    return nMoves;
+}
+
+uint32 generateMoves(HexaBitBoardPosition *pos, CMove *genMoves)
+{
+    uint32 nMoves;
+    int chance = pos->chance;
 #if USE_TEMPLATE_CHANCE_OPT == 1
     if (chance == BLACK)
     {
@@ -3679,6 +3846,148 @@ uint64 perft_bb(HexaBitBoardPosition *pos, uint32 depth)
 #else
     nMoves = MoveGeneratorBitboard::generateMoves(pos, genMoves, chance);
 #endif
+   
+    return nMoves;
+}
+
+__forceinline void makeMove(HexaBitBoardPosition *newPos, CMove move, uint8 chance)
+{
+
+#if DEBUG_PRINT_TIME_BREAKUP == 1
+    LARGE_INTEGER count1, count2;
+    QueryPerformanceCounter(&count1);    
+#endif
+
+#if USE_TEMPLATE_CHANCE_OPT == 1
+    if (chance == BLACK)
+    {
+        MoveGeneratorBitboard::makeMove<BLACK>(newPos, move);
+    }
+    else
+    {
+        MoveGeneratorBitboard::makeMove<WHITE>(newPos, move);
+    }
+#else
+        MoveGeneratorBitboard::makeMove(newPos, move, chance);
+#endif
+
+#if DEBUG_PRINT_TIME_BREAKUP == 1
+    QueryPerformanceCounter(&count2);
+    total_time_in_makeMove.QuadPart += (count2.QuadPart - count1.QuadPart);    
+#endif
+}
+
+
+
+// transposition table helper functions
+
+#if USE_TRANSPOSITION_TABLE == 1
+// look up the transposition table for an entry
+__forceinline TT_Entry lookupTT(uint64 hash)
+{
+    return TranspositionTable[hash & (TT_INDEX_BITS)];
+}
+
+// check if the given position is present in transposition table entry
+__forceinline bool searchTTEntry(TT_Entry &entry, uint64 hash, uint64 *perft)
+{
+#if USE_DUAL_SLOT_TT == 1
+    if ((entry.mostRecent.hashKey & TT_HASH_BITS) == (hash & TT_HASH_BITS))
+    {
+        *perft = entry.mostRecent.perftVal;
+        return true;
+    }
+    if ((entry.deepest.hashKey & TT_HASH_BITS) == (hash & TT_HASH_BITS))
+    {
+        *perft = entry.deepest.perftVal;
+        return true;
+    }
+#else
+    if ((entry.hashKey & TT_HASH_BITS) == (hash & TT_HASH_BITS))
+    {
+        *perft = entry.perftVal;
+        return true;
+    }
+#endif
+
+    return false;
+}
+
+__forceinline void storeTTEntry(TT_Entry &entry, uint64 hash, int depth, int count)
+{
+#if USE_DUAL_SLOT_TT == 1
+
+    // add this pos to deepest slot if this is deeper than deepest, or if the deepest is empty (depth=0)
+    if (entry.deepest.depth <= depth)
+    {
+        // avoid the entry to get overwritten if most recent slot is free (or is at lower depth)
+        if (entry.mostRecent.depth < entry.deepest.depth)
+        {
+            entry.mostRecent = entry.deepest;
+        }
+
+        entry.deepest.perftVal = count;
+        entry.deepest.hashKey = hash;
+        entry.deepest.depth = depth;
+    }
+    else
+    {
+        // otherwise add it to mostRecent slot
+        entry.mostRecent.perftVal = count;
+        entry.mostRecent.hashKey = hash;
+        entry.mostRecent.depth = depth;
+    }
+#else
+    // only replace hash table entry if previously stored entry is at shallower depth
+    if (entry.depth <= depth)
+    {
+        entry.perftVal = count;
+        entry.hashKey = hash;
+        entry.depth = depth;
+    }
+#endif
+    TranspositionTable[hash & (TT_INDEX_BITS)] = entry;
+}
+#endif
+
+// perft counter function. Returns perft of the given board for given depth
+#if USE_MOVE_LIST == 1
+uint64 perft_bb(HexaBitBoardPosition *pos, uint32 depth)
+{
+    CMove genMoves[MAX_MOVES];
+    uint32 nMoves = 0;
+
+#if USE_COUNT_ONLY_OPT == 1
+    if (depth == 1)
+    {
+#if USE_TRANSPOSITION_AT_LEAVES == 1
+#if INCREMENTAL_ZOBRIST_UPDATE == 1
+        uint64 hash = pos->zobristHash;
+#else
+        uint64 hash = computeZobristKey(pos);
+#endif
+        hash ^= zob.depth * depth;
+        TT_Entry entry;
+
+        // look-up the transposition table for a match
+        entry = lookupTT(hash);
+        uint64 perftVal;
+        if (searchTTEntry(entry, hash, &perftVal))
+        {
+            return perftVal;
+        }
+#endif
+
+        nMoves = countMoves(pos);
+
+#if USE_TRANSPOSITION_AT_LEAVES == 1
+        storeTTEntry(entry, hash, depth, nMoves);
+#endif
+        return nMoves;
+    }
+#endif
+
+    nMoves = generateMoves(pos, genMoves);
 
 #if USE_COUNT_ONLY_OPT == 0
     if (depth == 1)
@@ -3689,31 +3998,18 @@ uint64 perft_bb(HexaBitBoardPosition *pos, uint32 depth)
     // Ankan - for testing
     /*
     HexaBitBoardPosition newPositions[MAX_MOVES];
-    if (chance == BLACK)
-        nMoves = MoveGeneratorBitboard::generateBoards<BLACK>(pos, newPositions);
-    else
-        nMoves = MoveGeneratorBitboard::generateBoards<WHITE>(pos, newPositions);
+    nMoves = generateBoards(pos, newPositions);
     */
 
     uint64 count = 0;
+    uint8 chance = pos->chance;
 
     for (uint32 i=0; i < nMoves; i++)
     {
         // copy - make the move
         HexaBitBoardPosition newPos = *pos;
-#if USE_TEMPLATE_CHANCE_OPT == 1
-    if (chance == BLACK)
-    {
-        MoveGeneratorBitboard::makeMove<BLACK>(&newPos, genMoves[i]);
-    }
-    else
-    {
-        MoveGeneratorBitboard::makeMove<WHITE>(&newPos, genMoves[i]);
-    }
-#else
-        MoveGeneratorBitboard::makeMove(&newPos, genMoves[i], chance);
-#endif
 
+        makeMove(&newPos, genMoves[i], chance);
 
         // Ankan - for testing
         /*
@@ -3732,7 +4028,6 @@ uint64 perft_bb(HexaBitBoardPosition *pos, uint32 depth)
         }
         */
 
-
         uint64 childPerft = perft_bb(&newPos, depth - 1);
         count += childPerft;
     }
@@ -3742,7 +4037,6 @@ uint64 perft_bb(HexaBitBoardPosition *pos, uint32 depth)
 }
 #else
 
-uint64 globalHitCounter = 0;
 
 uint64 perft_bb(HexaBitBoardPosition *pos, uint32 depth)
 {
@@ -3756,62 +4050,34 @@ uint64 perft_bb(HexaBitBoardPosition *pos, uint32 depth)
 #endif    
 
     uint32 nMoves = 0;
-    uint8 chance = pos->chance;
 
 #if USE_COUNT_ONLY_OPT == 1
     if (depth == 1)
     {
-
 #if USE_TRANSPOSITION_AT_LEAVES == 1
         uint64 hash = computeZobristKey(pos);
         hash ^= zob.depth * depth;
+        TT_Entry entry;
 
         // look-up the transposition table for a match
-        HashEntryPerft entry = TranspositionTable[hash & (TT_INDEX_BITS)];
-        if ((entry.hashKey & TT_HASH_BITS) == (hash & TT_HASH_BITS))
+        entry = lookupTT(hash);
+        uint64 perftVal;
+        if (searchTTEntry(entry, hash, &perftVal))
         {
-            return entry.perftVal;
+            return perftVal;
         }
 #endif
 
-#if USE_TEMPLATE_CHANCE_OPT == 1
-        if (chance == BLACK)
-        {
-            nMoves = MoveGeneratorBitboard::countMoves<BLACK>(pos);
-        }
-        else
-        {
-            nMoves = MoveGeneratorBitboard::countMoves<WHITE>(pos);
-        }
-#else
-        nMoves = MoveGeneratorBitboard::countMoves(pos, chance);
-#endif
+    nMoves = countMoves(pos);
 
 #if USE_TRANSPOSITION_AT_LEAVES == 1
-        if (entry.depth <= depth)
-        {
-            entry.perftVal = nMoves;
-            entry.hashKey = hash;
-            entry.depth = depth;
-            TranspositionTable[hash & (TT_INDEX_BITS)] = entry;
-        }
+    storeTTEntry(entry, hash, depth, nMoves);
 #endif
         return nMoves;
     }
 #endif
 
-#if USE_TEMPLATE_CHANCE_OPT == 1
-    if (chance == BLACK)
-    {
-        nMoves = MoveGeneratorBitboard::generateBoards<BLACK>(pos, newPositions);
-    }
-    else
-    {
-        nMoves = MoveGeneratorBitboard::generateBoards<WHITE>(pos, newPositions);
-    }
-#else
-    nMoves = MoveGeneratorBitboard::generateBoards(pos, newPositions, chance);
-#endif
+    nMoves = generateBoards(pos, newPositions);
 
 #if USE_COUNT_ONLY_OPT == 0
     if (depth == 1)
@@ -3819,20 +4085,16 @@ uint64 perft_bb(HexaBitBoardPosition *pos, uint32 depth)
 #endif
 
 #if USE_TRANSPOSITION_TABLE == 1
-    uint64 hash;
-    HashEntryPerft entry;
+    TT_Entry entry;
+    uint64   hash = computeZobristKey(pos);
+    hash ^= zob.depth * depth;
 
-    //if (depth > 2)
+    // look-up the transposition table for a match
+    entry = lookupTT(hash);
+    uint64 perftVal;
+    if (searchTTEntry(entry, hash, &perftVal))
     {
-        hash = computeZobristKey(pos);
-        hash ^= zob.depth * depth;
-
-        // look-up the transposition table for a match
-        entry = TranspositionTable[hash & (TT_INDEX_BITS)];
-        if ((entry.hashKey & TT_HASH_BITS) == (hash & TT_HASH_BITS))
-        {
-            return entry.perftVal;
-        }
+        return perftVal;
     }
 #endif
 
@@ -3849,14 +4111,7 @@ uint64 perft_bb(HexaBitBoardPosition *pos, uint32 depth)
     }
 
 #if USE_TRANSPOSITION_TABLE == 1
-    // only replace hash table entry if previously stored entry is at shallower depth
-    if (/*depth > 2 &&*/ entry.depth <= depth)
-    {
-        entry.perftVal = count;
-        entry.hashKey = hash;
-        entry.depth = depth;
-        TranspositionTable[hash & (TT_INDEX_BITS)] = entry;
-    }
+    storeTTEntry(entry, hash, depth, count);
 #endif
     return count;
 }

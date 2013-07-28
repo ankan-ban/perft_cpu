@@ -224,8 +224,10 @@ struct HexaBitBoardPosition
     uint64   kings;
 
     // TODO: might want to keep it seperately
+    // currently we always calculate the zobrist key from scratch!
     uint64   zobristHash;
 };
+//CT_ASSERT(sizeof(HexaBitBoardPosition) == 48);
 CT_ASSERT(sizeof(HexaBitBoardPosition) == 56);
 
 // a more compact move structure (16 bit)
@@ -355,6 +357,14 @@ struct HashEntryPerft
     uint64 perftVal;
 };
 CT_ASSERT(sizeof(HashEntryPerft) == 16);
+
+// Paul B's method of storing two entries per slot of hash table
+struct DualHashEntry
+{
+    HashEntryPerft deepest;
+    HashEntryPerft mostRecent;
+};
+CT_ASSERT(sizeof(DualHashEntry) == 32);
 
 /** Declarations for class/methods in Util.cpp **/
 

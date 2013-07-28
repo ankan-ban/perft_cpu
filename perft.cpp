@@ -5,8 +5,9 @@
 
 // for timing CPU code : start
 double gTime;
+LARGE_INTEGER freq;
 #define START_TIMER { \
-    LARGE_INTEGER count1, count2, freq; \
+    LARGE_INTEGER count1, count2; \
     QueryPerformanceFrequency (&freq);  \
     QueryPerformanceCounter(&count1);
 
@@ -48,7 +49,11 @@ int main()
     // no bug till depth 10
     //Utils::readFENString("3k4/8/8/K1Pp3r/8/8/8/8 w - d6 0 1", &testBoard);
 
-    //Utils::readFENString("rnbqkb1r/ppppp1pp/7n/4P3/5p2/3K4/PPPP1PPP/RNBQ1BNR b kq - 0 3", &testBoard); // temp test
+    // bug at depth 11!! (expected is 337,294,265,604 - but we currently get 277,164,723,460)
+    // TODO: fix this bug!
+    // problem is likely with hash key collision, perft_gpu (without hash) gives correct result:
+    // GPU Perft 11: 337294265604,   Time taken: 48.6369 seconds, nps: 6934942128
+    //Utils::readFENString("RNBKQBNR/PPPPPPPP/8/8/8/8/pppppppp/rnbkqbnr w - -", &testBoard);
 
 
     /*
@@ -66,8 +71,12 @@ int main()
 
     HexaBitBoardPosition testBB;
     Utils::board088ToHexBB(&testBB, &testBoard);
-    Utils::boardHexBBTo088(&testBoard, &testBB);
 
+
+#if INCREMENTAL_ZOBRIST_UPDATE == 1
+    // compute hash of the position
+    testBB.zobristHash = computeZobristKey(&testBB);
+#endif
 
     int minDepth = 1;
     int maxDepth = 20;
@@ -79,11 +88,25 @@ int main()
 #if DEBUG_PRINT_MOVES == 1
         int depth = DEBUG_PRINT_DEPTH;
 #endif
+#if DEBUG_PRINT_UNIQUE_COUNTMOVES == 1        
+        globalCountMovesCounter = 0;
+#endif
         START_TIMER
         bbMoves = perft_bb(&testBB, depth);
         STOP_TIMER
         printf("\nPerft %d: %llu,   ", depth, bbMoves);
         printf("Time taken: %g seconds, nps: %llu\n", gTime/1000.0, (uint64) ((bbMoves/gTime)*1000.0));
+
+#if DEBUG_PRINT_UNIQUE_COUNTMOVES == 1        
+        printf("No of calls to countMoves: %llu\n", globalCountMovesCounter);
+#endif
+
+#if DEBUG_PRINT_TIME_BREAKUP == 1        
+        printf("zobrist computation time: %g seconds, countMoves: %g seconds, makeMove: %g seconds\n", 
+            ((double) total_time_in_zob.QuadPart)        / freq.QuadPart ,
+            ((double) total_time_in_countMoves.QuadPart) / freq.QuadPart ,
+            ((double) total_time_in_makeMove.QuadPart)   / freq.QuadPart);
+#endif
     }
     
     MoveGeneratorBitboard::destroy();

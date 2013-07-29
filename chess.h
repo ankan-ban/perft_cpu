@@ -223,9 +223,8 @@ struct HexaBitBoardPosition
     uint64   rookQueens;
     uint64   kings;
 
-    // TODO: might want to keep it seperately
-    // currently we always calculate the zobrist key from scratch!
-    //uint64   zobristHash;
+    // (stored seperately, or calculated from scratch when INCREMENTAL_ZOBRIST_UPDATE is 0)
+    // uint64   zobristHash;
 };
 CT_ASSERT(sizeof(HexaBitBoardPosition) == 48);
 //CT_ASSERT(sizeof(HexaBitBoardPosition) == 56);

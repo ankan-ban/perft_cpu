@@ -28,6 +28,7 @@
 
 // incrementally calculate zobrist hash when making a move / generating a board
 // currently only works with move list (when USE_MOVE_LIST == 1)
+// costs ~7% for CPU perft
 #define INCREMENTAL_ZOBRIST_UPDATE 0
 
 // check if the incremental update of zobrist hash is working as expected
@@ -84,6 +85,7 @@
 
 // use lookup table (magics) for sliding moves
 // reduces performance by ~7% for GPU version
+// but very impressive speedup for CPU version (~50%)
 #define USE_SLIDING_LUT 1
 
 // use fancy fixed-shift version - ~ 800 KB lookup tables
@@ -2809,14 +2811,14 @@ public:
 
 #if USE_TEMPLATE_CHANCE_OPT == 1
     template<uint8 chance>
-    CUDA_CALLABLE_MEMBER __forceinline static void makeMove (HexaBitBoardPosition *pos, CMove move)
+    CUDA_CALLABLE_MEMBER __forceinline static void makeMove (HexaBitBoardPosition *pos, uint64 &hash, CMove move)
 #else
-    CUDA_CALLABLE_MEMBER __forceinline static void makeMove (HexaBitBoardPosition *pos, CMove move, uint8 chance)
+    CUDA_CALLABLE_MEMBER __forceinline static void makeMove (HexaBitBoardPosition *pos, uint64 &hash, CMove move, uint8 chance)
 #endif
     {
 #if DEBUG_INCREMENTAL_ZOBRIST_UPDATE == 1
         uint64 origHash = computeZobristKey(pos);
-        if (pos->zobristHash != origHash)
+        if (hash != origHash)
         {
             printf("\nWrong zobrist hash inside position! ");
             scanf("%d", &origHash);
@@ -2844,7 +2846,7 @@ public:
 
 #if INCREMENTAL_ZOBRIST_UPDATE == 1
         // remove moving piece from source
-        pos->zobristHash ^= zob.pieces[chance][piece - 1][move.getFrom()];
+        hash ^= zob.pieces[chance][piece - 1][move.getFrom()];
 #endif
 
         // promote the pawn (if this was promotion move)
@@ -2878,33 +2880,33 @@ public:
 
             if (dstPiece)
             {
-                pos->zobristHash ^= zob.pieces[!chance][dstPiece - 1][move.getTo()];
+                hash ^= zob.pieces[!chance][dstPiece - 1][move.getTo()];
             }
         }
 
         // add moving piece at dst
-        pos->zobristHash ^= zob.pieces[chance][piece - 1][move.getTo()];
+        hash ^= zob.pieces[chance][piece - 1][move.getTo()];
 
         // flip color
-        pos->zobristHash ^= zob.chance;
+        hash ^= zob.chance;
 
         // clear special move flags
         // castling rights
         if (pos->whiteCastle & CASTLE_FLAG_KING_SIDE)
-            pos->zobristHash ^= zob.castlingRights[WHITE][0];
+            hash ^= zob.castlingRights[WHITE][0];
         if (pos->whiteCastle & CASTLE_FLAG_QUEEN_SIDE)
-            pos->zobristHash ^= zob.castlingRights[WHITE][1];
+            hash ^= zob.castlingRights[WHITE][1];
 
         if (pos->blackCastle & CASTLE_FLAG_KING_SIDE)
-            pos->zobristHash ^= zob.castlingRights[BLACK][0];
+            hash ^= zob.castlingRights[BLACK][0];
         if (pos->blackCastle & CASTLE_FLAG_QUEEN_SIDE)
-            pos->zobristHash ^= zob.castlingRights[BLACK][1];
+            hash ^= zob.castlingRights[BLACK][1];
 
 
         // en-passent target
         if (pos->enPassent)
         {
-            pos->zobristHash ^= zob.enPassentTarget[pos->enPassent - 1];
+            hash ^= zob.enPassentTarget[pos->enPassent - 1];
         }
 #endif
 
@@ -2963,7 +2965,7 @@ public:
             pos->pawns              &= ~(enPassentCapturedPiece & RANKS2TO7);
 
 #if INCREMENTAL_ZOBRIST_UPDATE == 1
-            pos->zobristHash ^= zob.pieces[!chance][ZOB_INDEX_PAWN][bitScan(enPassentCapturedPiece)];
+            hash ^= zob.pieces[!chance][ZOB_INDEX_PAWN][bitScan(enPassentCapturedPiece)];
 #endif
             if (chance == BLACK)
                 pos->whitePieces    &= ~enPassentCapturedPiece;
@@ -2978,8 +2980,8 @@ public:
                 pos->rookQueens  = (pos->rookQueens  ^ BIT(H1)) | BIT(F1);
                 pos->whitePieces = (pos->whitePieces ^ BIT(H1)) | BIT(F1);
 #if INCREMENTAL_ZOBRIST_UPDATE == 1
-                pos->zobristHash ^= zob.pieces[chance][ZOB_INDEX_ROOK][H1];
-                pos->zobristHash ^= zob.pieces[chance][ZOB_INDEX_ROOK][F1];
+                hash ^= zob.pieces[chance][ZOB_INDEX_ROOK][H1];
+                hash ^= zob.pieces[chance][ZOB_INDEX_ROOK][F1];
 #endif
             }
             else if (move.getFlags() == CM_FLAG_QUEEN_CASTLE)
@@ -2988,8 +2990,8 @@ public:
                 pos->rookQueens  = (pos->rookQueens  ^ BIT(A1)) | BIT(D1);
                 pos->whitePieces = (pos->whitePieces ^ BIT(A1)) | BIT(D1);
 #if INCREMENTAL_ZOBRIST_UPDATE == 1
-                pos->zobristHash ^= zob.pieces[chance][ZOB_INDEX_ROOK][A1];
-                pos->zobristHash ^= zob.pieces[chance][ZOB_INDEX_ROOK][D1];
+                hash ^= zob.pieces[chance][ZOB_INDEX_ROOK][A1];
+                hash ^= zob.pieces[chance][ZOB_INDEX_ROOK][D1];
 #endif
             }
         }
@@ -3000,8 +3002,8 @@ public:
                 // black castle king side
                 pos->rookQueens  = (pos->rookQueens  ^ BIT(H8)) | BIT(F8);
 #if INCREMENTAL_ZOBRIST_UPDATE == 1
-                pos->zobristHash ^= zob.pieces[chance][ZOB_INDEX_ROOK][H8];
-                pos->zobristHash ^= zob.pieces[chance][ZOB_INDEX_ROOK][F8];
+                hash ^= zob.pieces[chance][ZOB_INDEX_ROOK][H8];
+                hash ^= zob.pieces[chance][ZOB_INDEX_ROOK][F8];
 #endif
             }
             else if (move.getFlags() == CM_FLAG_QUEEN_CASTLE)
@@ -3009,8 +3011,8 @@ public:
                 // black castle queen side
                 pos->rookQueens  = (pos->rookQueens  ^ BIT(A8)) | BIT(D8);
 #if INCREMENTAL_ZOBRIST_UPDATE == 1
-                pos->zobristHash ^= zob.pieces[chance][ZOB_INDEX_ROOK][A8];
-                pos->zobristHash ^= zob.pieces[chance][ZOB_INDEX_ROOK][D8];
+                hash ^= zob.pieces[chance][ZOB_INDEX_ROOK][A8];
+                hash ^= zob.pieces[chance][ZOB_INDEX_ROOK][D8];
 #endif
             }
         }
@@ -3036,25 +3038,25 @@ public:
         // add special move flags
         // castling rights
         if (pos->whiteCastle & CASTLE_FLAG_KING_SIDE)
-            pos->zobristHash ^= zob.castlingRights[WHITE][0];
+            hash ^= zob.castlingRights[WHITE][0];
         if (pos->whiteCastle & CASTLE_FLAG_QUEEN_SIDE)
-            pos->zobristHash ^= zob.castlingRights[WHITE][1];
+            hash ^= zob.castlingRights[WHITE][1];
 
         if (pos->blackCastle & CASTLE_FLAG_KING_SIDE)
-            pos->zobristHash ^= zob.castlingRights[BLACK][0];
+            hash ^= zob.castlingRights[BLACK][0];
         if (pos->blackCastle & CASTLE_FLAG_QUEEN_SIDE)
-            pos->zobristHash ^= zob.castlingRights[BLACK][1];
+            hash ^= zob.castlingRights[BLACK][1];
 
 
         // en-passent target
         if (pos->enPassent)
         {
-            pos->zobristHash ^= zob.enPassentTarget[pos->enPassent - 1];
+            hash ^= zob.enPassentTarget[pos->enPassent - 1];
         }
 
 #if DEBUG_INCREMENTAL_ZOBRIST_UPDATE == 1
         uint64 calcHash = computeZobristKey(pos);
-        if (pos->zobristHash != calcHash)
+        if (hash != calcHash)
         {
             printf("\nWrong zobrist hash updation for move: ");
             Utils::displayCompactMove(move);
@@ -3898,7 +3900,7 @@ uint32 generateMoves(HexaBitBoardPosition *pos, CMove *genMoves)
     return nMoves;
 }
 
-__forceinline void makeMove(HexaBitBoardPosition *newPos, CMove move, uint8 chance)
+__forceinline void makeMove(HexaBitBoardPosition *newPos, uint64 &hash, CMove move, uint8 chance)
 {
 
 #if DEBUG_PRINT_TIME_BREAKUP == 1
@@ -3909,14 +3911,14 @@ __forceinline void makeMove(HexaBitBoardPosition *newPos, CMove move, uint8 chan
 #if USE_TEMPLATE_CHANCE_OPT == 1
     if (chance == BLACK)
     {
-        MoveGeneratorBitboard::makeMove<BLACK>(newPos, move);
+        MoveGeneratorBitboard::makeMove<BLACK>(newPos, hash, move);
     }
     else
     {
-        MoveGeneratorBitboard::makeMove<WHITE>(newPos, move);
+        MoveGeneratorBitboard::makeMove<WHITE>(newPos, hash, move);
     }
 #else
-        MoveGeneratorBitboard::makeMove(newPos, move, chance);
+        MoveGeneratorBitboard::makeMove(newPos, hash, move, chance);
 #endif
 
 #if DEBUG_PRINT_TIME_BREAKUP == 1
@@ -4005,7 +4007,7 @@ __forceinline void storeTTEntry(TT_Entry &entry, uint64 hash, int depth, uint64 
 
 // perft counter function. Returns perft of the given board for given depth
 #if USE_MOVE_LIST == 1
-uint64 perft_bb(HexaBitBoardPosition *pos, uint32 depth)
+uint64 perft_bb(HexaBitBoardPosition *pos, uint64 origHash, uint32 depth)
 {
     CMove genMoves[MAX_MOVES];
     uint32 nMoves = 0;
@@ -4015,9 +4017,10 @@ uint64 perft_bb(HexaBitBoardPosition *pos, uint32 depth)
     {
 #if USE_TRANSPOSITION_AT_LEAVES == 1
 #if INCREMENTAL_ZOBRIST_UPDATE == 1
-        uint64 hash = pos->zobristHash;
+        // origHash is the zobrist hash key of the position
+        uint64 hash = origHash;
 #else
-        uint64 hash = computeZobristKey(pos);
+        hash = computeZobristKey(pos);
 #endif
         hash ^= zob.depth * depth;
         TT_Entry entry;
@@ -4049,7 +4052,7 @@ uint64 perft_bb(HexaBitBoardPosition *pos, uint32 depth)
 
 #if USE_TRANSPOSITION_TABLE == 1
 #if INCREMENTAL_ZOBRIST_UPDATE == 1
-    uint64 hash = pos->zobristHash;
+    uint64 hash = origHash;
 #else
     uint64 hash = computeZobristKey(pos);
 #endif
@@ -4074,9 +4077,11 @@ uint64 perft_bb(HexaBitBoardPosition *pos, uint32 depth)
         // copy - make the move
         HexaBitBoardPosition newPos = *pos;
 
-        makeMove(&newPos, genMoves[i], chance);
+        uint64 newHash = origHash;
+        // newHash passed by reference!
+        makeMove(&newPos, newHash, genMoves[i], chance);
 
-        uint64 childPerft = perft_bb(&newPos, depth - 1);
+        uint64 childPerft = perft_bb(&newPos, newHash, depth - 1);
         count += childPerft;
     }
 
@@ -4089,8 +4094,8 @@ uint64 perft_bb(HexaBitBoardPosition *pos, uint32 depth)
 }
 #else
 
-
-uint64 perft_bb(HexaBitBoardPosition *pos, uint32 depth)
+// this version doesn't use incremental hash
+uint64 perft_bb(HexaBitBoardPosition *pos, uint64 /*hash*/, uint32 depth)
 {
     HexaBitBoardPosition newPositions[MAX_MOVES];
 
@@ -4123,7 +4128,7 @@ uint64 perft_bb(HexaBitBoardPosition *pos, uint32 depth)
     nMoves = countMoves(pos);
 
 #if USE_TRANSPOSITION_AT_LEAVES == 1
-    storeTTEntry(entry, hash, depth, nMoves);
+    storeTTEntry(entry, hash, depth, nMoves, pos);
 #endif
         return nMoves;
     }
@@ -4174,7 +4179,7 @@ uint64 perft_bb(HexaBitBoardPosition *pos, uint32 depth)
 
     for (uint32 i=0; i < nMoves; i++)
     {
-        uint64 childPerft = perft_bb(&newPositions[i], depth - 1);
+        uint64 childPerft = perft_bb(&newPositions[i], 0, depth - 1);
 #if DEBUG_PRINT_MOVES == 1
         if (depth == DEBUG_PRINT_DEPTH)
             printf("%llu\n", childPerft);

@@ -73,9 +73,10 @@ int main()
     Utils::board088ToHexBB(&testBB, &testBoard);
 
 
+    uint64 zobristHash = 0;
 #if INCREMENTAL_ZOBRIST_UPDATE == 1
     // compute hash of the position
-    testBB.zobristHash = computeZobristKey(&testBB);
+    zobristHash = computeZobristKey(&testBB);
 #endif
 
     int minDepth = 1;
@@ -92,7 +93,7 @@ int main()
         globalCountMovesCounter = 0;
 #endif
         START_TIMER
-        bbMoves = perft_bb(&testBB, depth);
+        bbMoves = perft_bb(&testBB, zobristHash, depth);
         STOP_TIMER
         printf("\nPerft %d: %llu,   ", depth, bbMoves);
         printf("Time taken: %g seconds, nps: %llu\n", gTime/1000.0, (uint64) ((bbMoves/gTime)*1000.0));

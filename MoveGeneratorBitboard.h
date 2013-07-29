@@ -16,6 +16,11 @@
 // show how many times countmoves got called (useful for testing TT usefulness)
 #define DEBUG_PRINT_UNIQUE_COUNTMOVES 0
 
+
+// first add moves to a move list and then use makeMove function to update the board
+// when this is set to 0, generateBoards is called to generate the updated boards directly
+#define USE_MOVE_LIST 0
+
 // make use of a hash table to avoid duplicate calculations due to transpositions
 #define USE_TRANSPOSITION_TABLE 1
 
@@ -24,6 +29,9 @@
 // incrementally calculate zobrist hash when making a move / generating a board
 // currently only works with move list (when USE_MOVE_LIST == 1)
 #define INCREMENTAL_ZOBRIST_UPDATE 0
+
+// check if the incremental update of zobrist hash is working as expected
+#define DEBUG_INCREMENTAL_ZOBRIST_UPDATE 0
 
 // store two positions (most recent and deepest) in every entry of hash table
 #define USE_DUAL_SLOT_TT 1
@@ -46,10 +54,6 @@
 
 
 #endif
-
-// first add moves to a move list and then use makeMove function to update the board
-// when this is set to 0, generateBoards is called to generate the updated boards directly
-#define USE_MOVE_LIST 0
 
 // only count moves at leaves (instead of generating/making them)
 #define USE_COUNT_ONLY_OPT 1
@@ -2810,6 +2814,15 @@ public:
     CUDA_CALLABLE_MEMBER __forceinline static void makeMove (HexaBitBoardPosition *pos, CMove move, uint8 chance)
 #endif
     {
+#if DEBUG_INCREMENTAL_ZOBRIST_UPDATE == 1
+        uint64 origHash = computeZobristKey(pos);
+        if (pos->zobristHash != origHash)
+        {
+            printf("\nWrong zobrist hash inside position! ");
+            scanf("%d", &origHash);
+        }
+#endif
+
         uint64 src = BIT(move.getFrom());
         uint64 dst = BIT(move.getTo());
 
@@ -2844,24 +2857,9 @@ public:
         else if (move.getFlags() == CM_FLAG_QUEEN_PROMOTION || move.getFlags() == CM_FLAG_QUEEN_PROMO_CAP)
             piece = QUEEN;
 
-
-        // remove source from all bitboards
-        pos->bishopQueens &= ~src;
-        pos->rookQueens   &= ~src;
-        pos->kings        &= ~src;
-        pos->knights      &= ~src;
-        pos->pawns        &= ~(src & RANKS2TO7);
-
-        // remove the dst from all bitboards
-        pos->bishopQueens &= ~dst;
-        pos->rookQueens   &= ~dst;
-        pos->kings        &= ~dst;
-        pos->knights      &= ~dst;
-        pos->pawns        &= ~(dst & RANKS2TO7);
-
 #if INCREMENTAL_ZOBRIST_UPDATE == 1
+
         // remove captured piece from dst
-        if (dst)
         {
             uint8 dstPiece = 0;
             // figure out destination piece
@@ -2875,10 +2873,13 @@ public:
                 dstPiece = QUEEN;
             else if (pos->bishopQueens & dst)
                 dstPiece = BISHOP;
-            else
+            else if (pos->rookQueens & dst)
                 dstPiece = ROOK;            
 
-            pos->zobristHash ^= zob.pieces[chance][dstPiece - 1][move.getTo()];
+            if (dstPiece)
+            {
+                pos->zobristHash ^= zob.pieces[!chance][dstPiece - 1][move.getTo()];
+            }
         }
 
         // add moving piece at dst
@@ -2906,6 +2907,20 @@ public:
             pos->zobristHash ^= zob.enPassentTarget[pos->enPassent - 1];
         }
 #endif
+
+        // remove source from all bitboards
+        pos->bishopQueens &= ~src;
+        pos->rookQueens   &= ~src;
+        pos->kings        &= ~src;
+        pos->knights      &= ~src;
+        pos->pawns        &= ~(src & RANKS2TO7);
+
+        // remove the dst from all bitboards
+        pos->bishopQueens &= ~dst;
+        pos->rookQueens   &= ~dst;
+        pos->kings        &= ~dst;
+        pos->knights      &= ~dst;
+        pos->pawns        &= ~(dst & RANKS2TO7);
 
         // put the piece that moved in the required bitboards
         if (piece == KING)
@@ -2947,6 +2962,9 @@ public:
 
             pos->pawns              &= ~(enPassentCapturedPiece & RANKS2TO7);
 
+#if INCREMENTAL_ZOBRIST_UPDATE == 1
+            pos->zobristHash ^= zob.pieces[!chance][ZOB_INDEX_PAWN][bitScan(enPassentCapturedPiece)];
+#endif
             if (chance == BLACK)
                 pos->whitePieces    &= ~enPassentCapturedPiece;
         }
@@ -2959,12 +2977,20 @@ public:
                 // white castle king side
                 pos->rookQueens  = (pos->rookQueens  ^ BIT(H1)) | BIT(F1);
                 pos->whitePieces = (pos->whitePieces ^ BIT(H1)) | BIT(F1);
+#if INCREMENTAL_ZOBRIST_UPDATE == 1
+                pos->zobristHash ^= zob.pieces[chance][ZOB_INDEX_ROOK][H1];
+                pos->zobristHash ^= zob.pieces[chance][ZOB_INDEX_ROOK][F1];
+#endif
             }
             else if (move.getFlags() == CM_FLAG_QUEEN_CASTLE)
             {
                 // white castle queen side
                 pos->rookQueens  = (pos->rookQueens  ^ BIT(A1)) | BIT(D1);
                 pos->whitePieces = (pos->whitePieces ^ BIT(A1)) | BIT(D1);
+#if INCREMENTAL_ZOBRIST_UPDATE == 1
+                pos->zobristHash ^= zob.pieces[chance][ZOB_INDEX_ROOK][A1];
+                pos->zobristHash ^= zob.pieces[chance][ZOB_INDEX_ROOK][D1];
+#endif
             }
         }
         else
@@ -2973,11 +2999,19 @@ public:
             {
                 // black castle king side
                 pos->rookQueens  = (pos->rookQueens  ^ BIT(H8)) | BIT(F8);
+#if INCREMENTAL_ZOBRIST_UPDATE == 1
+                pos->zobristHash ^= zob.pieces[chance][ZOB_INDEX_ROOK][H8];
+                pos->zobristHash ^= zob.pieces[chance][ZOB_INDEX_ROOK][F8];
+#endif
             }
             else if (move.getFlags() == CM_FLAG_QUEEN_CASTLE)
             {
                 // black castle queen side
                 pos->rookQueens  = (pos->rookQueens  ^ BIT(A8)) | BIT(D8);
+#if INCREMENTAL_ZOBRIST_UPDATE == 1
+                pos->zobristHash ^= zob.pieces[chance][ZOB_INDEX_ROOK][A8];
+                pos->zobristHash ^= zob.pieces[chance][ZOB_INDEX_ROOK][D8];
+#endif
             }
         }
 
@@ -3017,6 +3051,21 @@ public:
         {
             pos->zobristHash ^= zob.enPassentTarget[pos->enPassent - 1];
         }
+
+#if DEBUG_INCREMENTAL_ZOBRIST_UPDATE == 1
+        uint64 calcHash = computeZobristKey(pos);
+        if (pos->zobristHash != calcHash)
+        {
+            printf("\nWrong zobrist hash updation for move: ");
+            Utils::displayCompactMove(move);
+            printf("\nIn the board: ");
+            BoardPosition testBoard;
+            Utils::boardHexBBTo088(&testBoard, pos);
+            Utils::dispBoard(&testBoard);
+
+            scanf("%d", &calcHash);
+        }
+#endif
 #endif
 
     }
@@ -3985,7 +4034,7 @@ uint64 perft_bb(HexaBitBoardPosition *pos, uint32 depth)
         nMoves = countMoves(pos);
 
 #if USE_TRANSPOSITION_AT_LEAVES == 1
-        storeTTEntry(entry, hash, depth, nMoves);
+        storeTTEntry(entry, hash, depth, nMoves, pos);
 #endif
         return nMoves;
     }
@@ -3998,12 +4047,24 @@ uint64 perft_bb(HexaBitBoardPosition *pos, uint32 depth)
         return nMoves;
 #endif
 
+#if USE_TRANSPOSITION_TABLE == 1
+#if INCREMENTAL_ZOBRIST_UPDATE == 1
+    uint64 hash = pos->zobristHash;
+#else
+    uint64 hash = computeZobristKey(pos);
+#endif
+    hash ^= zob.depth * depth;
+    TT_Entry entry;
 
-    // Ankan - for testing
-    /*
-    HexaBitBoardPosition newPositions[MAX_MOVES];
-    nMoves = generateBoards(pos, newPositions);
-    */
+    // look-up the transposition table for a match
+    entry = lookupTT(hash);
+    uint64 perftVal;
+    if (searchTTEntry(entry, hash, &perftVal))
+    {
+        return perftVal;
+    }
+#endif
+
 
     uint64 count = 0;
     uint8 chance = pos->chance;
@@ -4015,26 +4076,13 @@ uint64 perft_bb(HexaBitBoardPosition *pos, uint32 depth)
 
         makeMove(&newPos, genMoves[i], chance);
 
-        // Ankan - for testing
-        /*
-        if(memcmp(&newPos, &newPositions[i], sizeof(HexaBitBoardPosition)))
-        {
-            printf("\n\ngot wrong board at index %d", i);
-            printf("\nBoard: \n");
-            BoardPosition testBoard;
-            Utils::boardHexBBTo088(&testBoard, pos);
-            Utils::dispBoard(&testBoard);            
-
-            printf("\nMove: ");
-            Utils::displayCompactMove(genMoves[i]);
-
-            assert(0);
-        }
-        */
-
         uint64 childPerft = perft_bb(&newPos, depth - 1);
         count += childPerft;
     }
+
+#if USE_TRANSPOSITION_TABLE == 1
+        storeTTEntry(entry, hash, depth, count, pos);
+#endif
 
     return count;
 

@@ -80,7 +80,7 @@ int main()
 #endif
 
     int minDepth = 1;
-    int maxDepth = 20;
+    int maxDepth = 32;
 
     uint64 bbMoves;
 

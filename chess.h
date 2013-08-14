@@ -371,6 +371,19 @@ struct DualHashEntry
 };
 CT_ASSERT(sizeof(DualHashEntry) == 32);
 
+struct ShallowHashEntry
+{
+    union
+    {
+        uint64 hashKey;     // most significant 40 bits used
+
+        // 24 LSB's are not important as the hash table size is at least 2 ^ 24 entries
+        // store perft (only for shallow depths) in the 24 LSB's
+        uint64 perftVal;    // least significant 24 bits used
+    };
+};
+CT_ASSERT(sizeof(ShallowHashEntry) == 8);
+
 /** Declarations for class/methods in Util.cpp **/
 
 // utility functions for reading FEN String, EPD file, displaying board, etc

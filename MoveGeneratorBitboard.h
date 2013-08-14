@@ -43,8 +43,8 @@
 // size of transposition table (in number of entries)
 // must be a power of two
 // each entry is of 16 bytes
-// 27 bits: 128 million entries -> 2 GB hash table
-#define TT_BITS     26
+// 27 bits: 128 million entries -> 4 GB hash table (when dual entry is used), or 2 GB when single entry is used
+#define TT_BITS     25
 #define TT_SIZE     (1 << TT_BITS)
 
 // bits of the zobrist hash used as index into the transposition table
@@ -53,7 +53,24 @@
 // remaining bits (that are stored per hash entry)
 #define TT_HASH_BITS   (ALLSET ^ TT_INDEX_BITS)
 
+// use a second transposition table for storing positions only at depth 2
+#define USE_SHALLOW_TT 1
 
+#if USE_SHALLOW_TT == 1
+// 27 bits: 128 million entries -> 1 GB (each entry is just single uint64: 8 bytes)
+#define SHALLOW_TT_BITS         28
+#define SHALLOW_TT_SIZE         (1 << SHALLOW_TT_BITS)
+#define SHALLOW_TT_INDEX_BITS   (SHALLOW_TT_SIZE - 1)
+#define SHALLOW_TT_HASH_BITS    (ALLSET ^ SHALLOW_TT_INDEX_BITS)
+#endif
+
+#if USE_TRANSPOSITION_AT_LEAVES == 1
+// 19 - 4 MB, 18 - 2 MB
+#define LEAVES_TT_BITS         19
+#define LEAVES_TT_SIZE         (1 << LEAVES_TT_BITS)
+#define LEAVES_TT_INDEX_BITS   (LEAVES_TT_SIZE - 1)
+#define LEAVES_TT_HASH_BITS    (ALLSET ^ LEAVES_TT_INDEX_BITS)
+#endif
 #endif
 
 // only count moves at leaves (instead of generating/making them)
@@ -69,7 +86,7 @@
 #define EN_PASSENT_GENERATION_NEW_METHOD 1
 
 // intel core 2 doesn't have popcnt instruction
-#define USE_POPCNT 0
+#define USE_POPCNT 1
 
 // pentium 4 doesn't have fast HW bitscan
 #define USE_HW_BITSCAN 1
@@ -264,6 +281,8 @@ static ZobristRandoms zob;
 #endif
 
 static TT_Entry *TranspositionTable;
+static uint64   *ShallowTT;
+static uint64   *LeavesTT;
 
 #if TEST_GPU_PERFT == 1
 // gpu version of the above data structures
@@ -916,7 +935,6 @@ public:
     // finds the squares in between the two given squares
     // taken from 
     // http://chessprogramming.wikispaces.com/Square+Attacked+By#Legality Test-In Between-Pure Calculation
-    // Ankan : TODO: this doesn't seem to work for G8 - B3
     CUDA_CALLABLE_MEMBER __forceinline static uint64 squaresInBetween(uint8 sq1, uint8 sq2)
     {
         const uint64 m1   = C64(0xFFFFFFFFFFFFFFFF);
@@ -1008,6 +1026,26 @@ public:
             printf("\nFailed to allocate transposition table of %d bytes\n", TT_SIZE * sizeof(TT_Entry));
         }
         memset(TranspositionTable, 0, TT_SIZE * sizeof(TT_Entry));
+
+#if USE_SHALLOW_TT == 1
+        ShallowTT = (uint64*) malloc(SHALLOW_TT_SIZE * sizeof(uint64));
+        if (ShallowTT == NULL)
+        {
+            printf("\nFailed to allocate ShallowTT transposition table of %d bytes\n", SHALLOW_TT_SIZE * sizeof(uint64));
+        }
+        memset(ShallowTT, 0, SHALLOW_TT_SIZE * sizeof(uint64));
+
+#endif
+
+#if USE_TRANSPOSITION_AT_LEAVES
+        LeavesTT = (uint64*) malloc(LEAVES_TT_SIZE * sizeof(uint64));
+        if (LeavesTT == NULL)
+        {
+            printf("\nFailed to allocate LeavesTT transposition table of %d bytes\n", LEAVES_TT_SIZE * sizeof(uint64));
+        }
+        memset(LeavesTT, 0, LEAVES_TT_SIZE * sizeof(uint64));
+#endif
+
 #endif 
 
         // initialize the empty board attack tables
@@ -4022,22 +4060,18 @@ uint64 perft_bb(HexaBitBoardPosition *pos, uint64 origHash, uint32 depth)
 #else
         hash = computeZobristKey(pos);
 #endif
-        hash ^= zob.depth * depth;
-        TT_Entry entry;
-
-        // look-up the transposition table for a match
-        entry = lookupTT(hash);
-        uint64 perftVal;
-        if (searchTTEntry(entry, hash, &perftVal))
+        uint64 entry = LeavesTT[hash & (LEAVES_TT_INDEX_BITS)];
+        if ((entry & LEAVES_TT_HASH_BITS) == (hash & LEAVES_TT_HASH_BITS))
         {
-            return perftVal;
+            return entry & LEAVES_TT_INDEX_BITS;
         }
 #endif
 
         nMoves = countMoves(pos);
 
 #if USE_TRANSPOSITION_AT_LEAVES == 1
-        storeTTEntry(entry, hash, depth, nMoves, pos);
+        LeavesTT[hash & (LEAVES_TT_INDEX_BITS)] = (hash  & LEAVES_TT_HASH_BITS)  |
+                                                  (nMoves & LEAVES_TT_INDEX_BITS) ;
 #endif
         return nMoves;
     }
@@ -4059,12 +4093,23 @@ uint64 perft_bb(HexaBitBoardPosition *pos, uint64 origHash, uint32 depth)
     hash ^= zob.depth * depth;
     TT_Entry entry;
 
-    // look-up the transposition table for a match
-    entry = lookupTT(hash);
-    uint64 perftVal;
-    if (searchTTEntry(entry, hash, &perftVal))
+    if (depth == 2)
     {
-        return perftVal;
+        uint64 entry = ShallowTT[hash & (SHALLOW_TT_INDEX_BITS)];
+        if ((entry & SHALLOW_TT_HASH_BITS) == (hash & SHALLOW_TT_HASH_BITS))
+        {
+            return entry & SHALLOW_TT_INDEX_BITS;
+        }
+    }
+    else
+    {
+        // look-up the transposition table for a match
+        entry = lookupTT(hash);
+        uint64 perftVal;
+        if (searchTTEntry(entry, hash, &perftVal))
+        {
+            return perftVal;
+        }
     }
 #endif
 
@@ -4086,7 +4131,15 @@ uint64 perft_bb(HexaBitBoardPosition *pos, uint64 origHash, uint32 depth)
     }
 
 #if USE_TRANSPOSITION_TABLE == 1
+    if (depth == 2)
+    {
+        ShallowTT[hash & (SHALLOW_TT_INDEX_BITS)] = (hash  & SHALLOW_TT_HASH_BITS)  |
+                                                    (count & SHALLOW_TT_INDEX_BITS) ;
+    }
+    else
+    {
         storeTTEntry(entry, hash, depth, count, pos);
+    }
 #endif
 
     return count;
@@ -4141,39 +4194,54 @@ uint64 perft_bb(HexaBitBoardPosition *pos, uint64 /*hash*/, uint32 depth)
         return nMoves;
 #endif
 
+
 #if USE_TRANSPOSITION_TABLE == 1
     TT_Entry entry;
     uint64   hash = computeZobristKey(pos);
     hash ^= zob.depth * depth;
 
-    // look-up the transposition table for a match
-    entry = lookupTT(hash);
-    uint64 perftVal = 0;
-    if (searchTTEntry(entry, hash, &perftVal))
+#if USE_SHALLOW_TT == 1
+    if (depth == 2)
     {
-#if DEBUG_CATCH_HASH_COLLISIONS == 1
-        if (entry.depth != depth)
+        uint64 entry = ShallowTT[hash & (SHALLOW_TT_INDEX_BITS)];
+        if ((entry & SHALLOW_TT_HASH_BITS) == (hash & SHALLOW_TT_HASH_BITS))
         {
-            printf("got collision due to depth!\n");
-            BoardPosition testBoard;
-            Utils::boardHexBBTo088(&testBoard, pos);
-            Utils::dispBoard(&testBoard);
+            return entry & SHALLOW_TT_INDEX_BITS;
         }
-        if (memcmp(&entry.pos, pos, sizeof(entry.pos)))
-        {
-            printf("got collision!\n");
-            BoardPosition testBoard;
-
-            Utils::boardHexBBTo088(&testBoard, &entry.pos);
-            Utils::dispBoard(&testBoard);
-
-            Utils::boardHexBBTo088(&testBoard, pos);
-            Utils::dispBoard(&testBoard);
-        }
+    }
+    else
 #endif
-        return perftVal;
+    {
+        // look-up the transposition table for a match
+        entry = lookupTT(hash);
+        uint64 perftVal = 0;
+        if (searchTTEntry(entry, hash, &perftVal))
+        {
+#if DEBUG_CATCH_HASH_COLLISIONS == 1
+            if (entry.depth != depth)
+            {
+                printf("got collision due to depth!\n");
+                BoardPosition testBoard;
+                Utils::boardHexBBTo088(&testBoard, pos);
+                Utils::dispBoard(&testBoard);
+            }
+            if (memcmp(&entry.pos, pos, sizeof(entry.pos)))
+            {
+                printf("got collision!\n");
+                BoardPosition testBoard;
+
+                Utils::boardHexBBTo088(&testBoard, &entry.pos);
+                Utils::dispBoard(&testBoard);
+
+                Utils::boardHexBBTo088(&testBoard, pos);
+                Utils::dispBoard(&testBoard);
+            }
+#endif
+            return perftVal;
+        }
     }
 #endif
+
 
     uint64 count = 0;
 
@@ -4195,7 +4263,17 @@ uint64 perft_bb(HexaBitBoardPosition *pos, uint64 /*hash*/, uint32 depth)
     */
 
 #if USE_TRANSPOSITION_TABLE == 1
-    storeTTEntry(entry, hash, depth, count, pos);
+#if USE_SHALLOW_TT == 1
+    if (depth == 2)
+    {
+        ShallowTT[hash & (SHALLOW_TT_INDEX_BITS)] = (hash  & SHALLOW_TT_HASH_BITS)  |
+                                                    (count & SHALLOW_TT_INDEX_BITS) ;
+    }
+    else
+#endif
+    {
+        storeTTEntry(entry, hash, depth, count, pos);
+    }
 #endif
     return count;
 }

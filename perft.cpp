@@ -92,6 +92,16 @@ int main()
 #if DEBUG_PRINT_UNIQUE_COUNTMOVES == 1        
         globalCountMovesCounter = 0;
 #endif
+
+#if PRINT_HASH_STATS == 1
+        for (int i=0;i<=depth;i++)
+        {
+            numProbes[i] = 0;
+            numHits[i] = 0;
+            numStores[i] = 0;
+        }
+#endif
+
         START_TIMER
         bbMoves = perft_bb(&testBB, zobristHash, depth);
         STOP_TIMER
@@ -100,6 +110,13 @@ int main()
 
 #if DEBUG_PRINT_UNIQUE_COUNTMOVES == 1        
         printf("No of calls to countMoves: %llu\n", globalCountMovesCounter);
+#endif
+
+#if PRINT_HASH_STATS == 1
+    printf("\nHash stats per depth\n");
+    printf("depth   hash probes      hash hits    hash stores\n");
+    for (int i=2; i<=depth; i++)
+        printf("%5d   %11llu    %11llu    %11llu\n", i, numProbes[i], numHits[i], numStores[i]);
 #endif
 
 #if DEBUG_PRINT_TIME_BREAKUP == 1        

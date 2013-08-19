@@ -314,6 +314,7 @@ code	promotion	capture	special 1	special 0	kind of move
 // max no of moves possible for a given board position (this can be as large as 218 ?)
 // e.g, test this FEN string "3Q4/1Q4Q1/4Q3/2Q4R/Q4Q2/3Q4/1Q4Rp/1K1BBNNk w - - 0 1"
 #define MAX_MOVES 256
+#define MAX_GAME_LENGTH 300
 
 // max no of moves possible by a single piece
 // actually it's 27 for a queen when it's in the center of the board

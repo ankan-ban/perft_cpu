@@ -16,6 +16,9 @@
 // show how many times countmoves got called (useful for testing TT usefulness)
 #define DEBUG_PRINT_UNIQUE_COUNTMOVES 0
 
+// print  various hash statistics
+#define PRINT_HASH_STATS 0
+
 
 // first add moves to a move list and then use makeMove function to update the board
 // when this is set to 0, generateBoards is called to generate the updated boards directly
@@ -86,7 +89,7 @@
 #define EN_PASSENT_GENERATION_NEW_METHOD 1
 
 // intel core 2 doesn't have popcnt instruction
-#define USE_POPCNT 1
+#define USE_POPCNT 0
 
 // pentium 4 doesn't have fast HW bitscan
 #define USE_HW_BITSCAN 1
@@ -1993,8 +1996,7 @@ public:
         {
             uint64 enPassentCapturedPiece = (chance == WHITE) ? southOne(enPassentTarget) : northOne(enPassentTarget);
 
-            uint64 epSources = ((chance == WHITE) ? southEastOne(enPassentTarget) | southWestOne(enPassentTarget) : 
-                                                    northEastOne(enPassentTarget) | northWestOne(enPassentTarget)) & myPawns;
+            uint64 epSources = (eastOne(enPassentCapturedPiece) | westOne(enPassentCapturedPiece)) & myPawns;
 
             while (epSources)
             {
@@ -2555,8 +2557,11 @@ public:
         {
             uint64 enPassentCapturedPiece = (chance == WHITE) ? southOne(enPassentTarget) : northOne(enPassentTarget);
 
+            uint64 epSources = (eastOne(enPassentCapturedPiece) | westOne(enPassentCapturedPiece)) & myPawns;
+/*
             uint64 epSources = ((chance == WHITE) ? southEastOne(enPassentTarget) | southWestOne(enPassentTarget) : 
                                                     northEastOne(enPassentTarget) | northWestOne(enPassentTarget)) & myPawns;
+*/
 
             while (epSources)
             {
@@ -3355,8 +3360,11 @@ public:
         {
             uint64 enPassentCapturedPiece = (chance == WHITE) ? southOne(enPassentTarget) : northOne(enPassentTarget);
 
+            uint64 epSources = (eastOne(enPassentCapturedPiece) | westOne(enPassentCapturedPiece)) & myPawns;
+            /*
             uint64 epSources = ((chance == WHITE) ? southEastOne(enPassentTarget) | southWestOne(enPassentTarget) : 
                                                     northEastOne(enPassentTarget) | northWestOne(enPassentTarget)) & myPawns;
+            */
 
             while (epSources)
             {
@@ -3605,9 +3613,10 @@ uint64 computeZobristKey(HexaBitBoardPosition *pos)
 #endif
 
     uint64 key = 0;
+    int chance = pos->chance;
 
     // chance (side to move)
-    if (pos->chance == WHITE)
+    if (chance)
         key ^= zob.chance;
 
     // castling rights
@@ -3622,17 +3631,38 @@ uint64 computeZobristKey(HexaBitBoardPosition *pos)
         key ^= zob.castlingRights[BLACK][1];
 
 
-    // en-passent target
-    if (pos->enPassent)
-    {
-        key ^= zob.enPassentTarget[pos->enPassent - 1];
-    }
-    
-
-    // piece-position
+   
     uint64 allPawns     = pos->pawns & RANKS2TO7;    // get rid of game state variables
     uint64 allPieces    = pos->kings |  allPawns | pos->knights | pos->bishopQueens | pos->rookQueens;
 
+    // en-passent target
+    if (pos->enPassent)
+    {
+        uint64 blackPieces  = allPieces & (~pos->whitePieces);
+        uint64 myPieces     = (chance == WHITE) ? pos->whitePieces : blackPieces;
+        uint64 myPawns      = allPawns & myPieces;
+
+        // only update the flag if en-passent is possible
+        uint64 enPassentCapturedPiece;
+        if (chance == BLACK)
+        {
+            enPassentCapturedPiece = BIT(pos->enPassent - 1) << (8 * 3);
+        }
+        else
+        {
+            enPassentCapturedPiece = BIT(pos->enPassent - 1) << (8 * 4);
+        }
+        uint64 epSources = (MoveGeneratorBitboard::eastOne(enPassentCapturedPiece) | 
+                            MoveGeneratorBitboard::westOne(enPassentCapturedPiece) )
+                            & myPawns;
+
+        if (epSources)
+        {
+            key ^= zob.enPassentTarget[pos->enPassent - 1];
+        }
+    }
+
+    // piece-position
     while(allPieces)
     {
         uint64 piece = MoveGeneratorBitboard::getOne(allPieces);
@@ -3861,6 +3891,13 @@ void findMagics()
 #if DEBUG_PRINT_UNIQUE_COUNTMOVES == 1
 uint64 globalCountMovesCounter = 0;
 #endif
+
+#if PRINT_HASH_STATS == 1
+uint64  numProbes[MAX_GAME_LENGTH];
+uint64  numHits[MAX_GAME_LENGTH];
+uint64  numStores[MAX_GAME_LENGTH];
+#endif
+
 
 // perft helper functions
 uint32 countMoves(HexaBitBoardPosition *pos)
@@ -4199,13 +4236,18 @@ uint64 perft_bb(HexaBitBoardPosition *pos, uint64 /*hash*/, uint32 depth)
     TT_Entry entry;
     uint64   hash = computeZobristKey(pos);
     hash ^= zob.depth * depth;
-
+#if PRINT_HASH_STATS == 1
+    numProbes[depth]++;
+#endif
 #if USE_SHALLOW_TT == 1
     if (depth == 2)
     {
         uint64 entry = ShallowTT[hash & (SHALLOW_TT_INDEX_BITS)];
         if ((entry & SHALLOW_TT_HASH_BITS) == (hash & SHALLOW_TT_HASH_BITS))
         {
+#if PRINT_HASH_STATS == 1
+            numHits[2]++;
+#endif
             return entry & SHALLOW_TT_INDEX_BITS;
         }
     }
@@ -4217,6 +4259,9 @@ uint64 perft_bb(HexaBitBoardPosition *pos, uint64 /*hash*/, uint32 depth)
         uint64 perftVal = 0;
         if (searchTTEntry(entry, hash, &perftVal))
         {
+#if PRINT_HASH_STATS == 1
+            numHits[depth]++;
+#endif
 #if DEBUG_CATCH_HASH_COLLISIONS == 1
             if (entry.depth != depth)
             {
@@ -4263,9 +4308,14 @@ uint64 perft_bb(HexaBitBoardPosition *pos, uint64 /*hash*/, uint32 depth)
     */
 
 #if USE_TRANSPOSITION_TABLE == 1
+#if PRINT_HASH_STATS == 1
+    numStores[depth]++;
+#endif
 #if USE_SHALLOW_TT == 1
     if (depth == 2)
     {
+        //printf("%08X%08X\n", HI(hash), LO(hash));
+
         ShallowTT[hash & (SHALLOW_TT_INDEX_BITS)] = (hash  & SHALLOW_TT_HASH_BITS)  |
                                                     (count & SHALLOW_TT_INDEX_BITS) ;
     }

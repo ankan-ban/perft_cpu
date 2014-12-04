@@ -5,7 +5,23 @@
 #include <stdio.h>
 #include <conio.h>
 #include <string.h>
-#include <assert.h>
+
+//#include <assert.h>
+#define assert(x) 
+
+// for some exteremely weired reason having some code (with real function call in non-executing branch)
+// in assert inproves performance a lot (>15%!) - only when using MSVC compiler!
+// This can be seen either using assert from assert.h or in the below sample code
+#if 0
+static void assert(bool x)
+{
+	if (!x)
+	{
+		printf("assert hit");
+	}
+}
+#endif
+
 #include <windows.h>
 
 typedef unsigned char      uint8;

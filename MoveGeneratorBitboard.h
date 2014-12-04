@@ -4,6 +4,8 @@
 #include <intrin.h>
 #include <time.h>
 
+#define MY_INLINE inline
+
 #define DEBUG_PRINT_MOVES 0
 #if DEBUG_PRINT_MOVES == 1
     #define DEBUG_PRINT_DEPTH 11
@@ -47,7 +49,7 @@
 // must be a power of two
 // each entry is of 16 bytes
 // 27 bits: 128 million entries -> 4 GB hash table (when dual entry is used), or 2 GB when single entry is used
-#define TT_BITS     25
+#define TT_BITS     26
 #define TT_SIZE     (1 << TT_BITS)
 
 // bits of the zobrist hash used as index into the transposition table
@@ -61,7 +63,7 @@
 
 #if USE_SHALLOW_TT == 1
 // 27 bits: 128 million entries -> 1 GB (each entry is just single uint64: 8 bytes)
-#define SHALLOW_TT_BITS         28
+#define SHALLOW_TT_BITS         29
 #define SHALLOW_TT_SIZE         (1 << SHALLOW_TT_BITS)
 #define SHALLOW_TT_INDEX_BITS   (SHALLOW_TT_SIZE - 1)
 #define SHALLOW_TT_HASH_BITS    (ALLSET ^ SHALLOW_TT_INDEX_BITS)
@@ -83,13 +85,13 @@
 #define USE_TEMPLATE_CHANCE_OPT 1
 
 // bitwise magic instead of if/else for castle flag updation
-#define USE_BITWISE_MAGIC_FOR_CASTLE_FLAG_UPDATION 1
+#define USE_BITWISE_MAGIC_FOR_CASTLE_FLAG_UPDATION 0
 
 // Move counting (countOnly) doesn't work with old method
 #define EN_PASSENT_GENERATION_NEW_METHOD 1
 
 // intel core 2 doesn't have popcnt instruction
-#define USE_POPCNT 0
+#define USE_POPCNT 1
 
 // pentium 4 doesn't have fast HW bitscan
 #define USE_HW_BITSCAN 1
@@ -112,7 +114,8 @@
 // (setting this to 0 enables plain magics - with 2.3 MB lookup table)
 // plain magics is a bit faster at least for perft (on core 2 duo)
 // fancy magics is clearly faster on more recent processors (ivy bridge)
-#define USE_FANCY_MAGICS 1
+// intel compiler with haswell clearly like plain magics (~7% perf gain over fancy)
+#define USE_FANCY_MAGICS 0
 
 // use byte lookup for fancy magics (~150 KB lookup tables)
 // >10% slower than fixed shift fancy magics on both CPU and GPU
@@ -167,7 +170,7 @@
 #define ALLSET    C64(0xFFFFFFFFFFFFFFFF)
 #define EMPTY     C64(0x0)
 
-CUDA_CALLABLE_MEMBER __forceinline uint8 popCount(uint64 x)
+CUDA_CALLABLE_MEMBER MY_INLINE uint8 popCount(uint64 x)
 {
 #ifdef __CUDA_ARCH__
     return __popcll(x);
@@ -197,19 +200,38 @@ CUDA_CALLABLE_MEMBER __forceinline uint8 popCount(uint64 x)
 }
 
 
+
+
+
 // return the index of first set LSB
-CUDA_CALLABLE_MEMBER __forceinline uint8 bitScan(uint64 x)
+CUDA_CALLABLE_MEMBER /*MY_INLINE*/ uint8 bitScan(uint64 x)
 {
+#if USE_HW_BITSCAN != 1
+	const int index64[64] = {
+		0, 1, 48, 2, 57, 49, 28, 3,
+		61, 58, 50, 42, 38, 29, 17,  4,
+		62, 55, 59, 36, 53, 51, 43, 22,
+		45, 39, 33, 30, 24, 18, 12,  5,
+		63, 47, 56, 27, 60, 41, 37, 16,
+		54, 35, 52, 21, 44, 32, 23, 11,
+		46, 26, 40, 15, 34, 20, 31, 10,
+		25, 14, 19, 9, 13, 8, 7, 6
+		};
+	const uint64 debruijn64 = C64(0x03f79d71b4cb0a89);
+	assert(x != 0);
+	return index64[((x & -x) * debruijn64) >> 58];
+#else
 #ifdef __CUDA_ARCH__
     // __ffsll(x) returns position from 1 to 64 instead of 0 to 63
     return __ffsll(x) - 1;
 #elif _WIN64
-   unsigned long index;
+   unsigned long index = 0;
    assert (x != 0);
+
    _BitScanForward64(&index, x);
    return (uint8) index;    
 #else
-#if USE_HW_BITSCAN == 1
+
     uint32 lo = (uint32)  x;
     uint32 hi = (uint32) (x >> 32);
     DWORD id; 
@@ -223,20 +245,6 @@ CUDA_CALLABLE_MEMBER __forceinline uint8 bitScan(uint64 x)
     }
 
     return (uint8) id; 
-#else
-    const int index64[64] = {
-        0,  1, 48,  2, 57, 49, 28,  3,
-       61, 58, 50, 42, 38, 29, 17,  4,
-       62, 55, 59, 36, 53, 51, 43, 22,
-       45, 39, 33, 30, 24, 18, 12,  5,
-       63, 47, 56, 27, 60, 41, 37, 16,
-       54, 35, 52, 21, 44, 32, 23, 11,
-       46, 26, 40, 15, 34, 20, 31, 10,
-       25, 14, 19,  9, 13,  8,  7,  6
-    };
-    const uint64 debruijn64 = C64(0x03f79d71b4cb0a89);
-    assert (x != 0);
-    return index64[((x & -x) * debruijn64) >> 58];         
 #endif
 #endif
 }
@@ -328,7 +336,7 @@ __device__ static uint64 g_fancy_byte_BishopLookup[1428];
 __device__ static uint64 g_fancy_byte_RookLookup[4900];
 #endif // #if TEST_GPU_PERFT == 1
 
-CUDA_CALLABLE_MEMBER __forceinline uint64 sqsInBetweenLUT(uint8 sq1, uint8 sq2)
+CUDA_CALLABLE_MEMBER MY_INLINE uint64 sqsInBetweenLUT(uint8 sq1, uint8 sq2)
 {
 #ifdef __CUDA_ARCH__
     return __ldg(&gBetween[sq1][sq2]);
@@ -337,7 +345,7 @@ CUDA_CALLABLE_MEMBER __forceinline uint64 sqsInBetweenLUT(uint8 sq1, uint8 sq2)
 #endif
 }
 
-CUDA_CALLABLE_MEMBER __forceinline uint64 sqsInLineLUT(uint8 sq1, uint8 sq2)
+CUDA_CALLABLE_MEMBER MY_INLINE uint64 sqsInLineLUT(uint8 sq1, uint8 sq2)
 {
 #ifdef __CUDA_ARCH__
     return __ldg(&gLine[sq1][sq2]);
@@ -346,7 +354,7 @@ CUDA_CALLABLE_MEMBER __forceinline uint64 sqsInLineLUT(uint8 sq1, uint8 sq2)
 #endif
 }
 
-CUDA_CALLABLE_MEMBER __forceinline uint64 sqKnightAttacks(uint8 sq)
+CUDA_CALLABLE_MEMBER MY_INLINE uint64 sqKnightAttacks(uint8 sq)
 {
 #ifdef __CUDA_ARCH__
     return __ldg(&gKnightAttacks[sq]);
@@ -355,7 +363,7 @@ CUDA_CALLABLE_MEMBER __forceinline uint64 sqKnightAttacks(uint8 sq)
 #endif
 }
 
-CUDA_CALLABLE_MEMBER __forceinline uint64 sqKingAttacks(uint8 sq)
+CUDA_CALLABLE_MEMBER MY_INLINE uint64 sqKingAttacks(uint8 sq)
 {
 #ifdef __CUDA_ARCH__
     return __ldg(&gKingAttacks[sq]);
@@ -364,7 +372,7 @@ CUDA_CALLABLE_MEMBER __forceinline uint64 sqKingAttacks(uint8 sq)
 #endif
 }
 
-CUDA_CALLABLE_MEMBER __forceinline uint64 sqRookAttacks(uint8 sq)
+CUDA_CALLABLE_MEMBER MY_INLINE uint64 sqRookAttacks(uint8 sq)
 {
 #ifdef __CUDA_ARCH__
     return __ldg(&gRookAttacks[sq]);
@@ -373,7 +381,7 @@ CUDA_CALLABLE_MEMBER __forceinline uint64 sqRookAttacks(uint8 sq)
 #endif
 }
 
-CUDA_CALLABLE_MEMBER __forceinline uint64 sqBishopAttacks(uint8 sq)
+CUDA_CALLABLE_MEMBER MY_INLINE uint64 sqBishopAttacks(uint8 sq)
 {
 #ifdef __CUDA_ARCH__
     return __ldg(&gBishopAttacks[sq]);
@@ -382,7 +390,7 @@ CUDA_CALLABLE_MEMBER __forceinline uint64 sqBishopAttacks(uint8 sq)
 #endif
 }
 
-CUDA_CALLABLE_MEMBER __forceinline uint64 sqBishopAttacksMasked(uint8 sq)
+CUDA_CALLABLE_MEMBER MY_INLINE uint64 sqBishopAttacksMasked(uint8 sq)
 {
 #ifdef __CUDA_ARCH__
     return __ldg(&gBishopAttacksMasked[sq]);
@@ -391,7 +399,7 @@ CUDA_CALLABLE_MEMBER __forceinline uint64 sqBishopAttacksMasked(uint8 sq)
 #endif
 }
 
-CUDA_CALLABLE_MEMBER __forceinline uint64 sqRookAttacksMasked(uint8 sq)
+CUDA_CALLABLE_MEMBER MY_INLINE uint64 sqRookAttacksMasked(uint8 sq)
 {
 #ifdef __CUDA_ARCH__
     return __ldg(&gRookAttacksMasked[sq]);
@@ -400,7 +408,7 @@ CUDA_CALLABLE_MEMBER __forceinline uint64 sqRookAttacksMasked(uint8 sq)
 #endif
 }
 
-CUDA_CALLABLE_MEMBER __forceinline uint64 sqRookMagics(uint8 sq)
+CUDA_CALLABLE_MEMBER MY_INLINE uint64 sqRookMagics(uint8 sq)
 {
 #ifdef __CUDA_ARCH__
     return __ldg(&gRookMagics[sq]);
@@ -409,7 +417,7 @@ CUDA_CALLABLE_MEMBER __forceinline uint64 sqRookMagics(uint8 sq)
 #endif
 }
 
-CUDA_CALLABLE_MEMBER __forceinline uint64 sqBishopMagics(uint8 sq)
+CUDA_CALLABLE_MEMBER MY_INLINE uint64 sqBishopMagics(uint8 sq)
 {
 #ifdef __CUDA_ARCH__
     return __ldg(&gBishopMagics[sq]);
@@ -418,7 +426,7 @@ CUDA_CALLABLE_MEMBER __forceinline uint64 sqBishopMagics(uint8 sq)
 #endif
 }
 
-CUDA_CALLABLE_MEMBER __forceinline uint64 sqRookMagicAttackTables(uint8 sq, uint64 index)
+CUDA_CALLABLE_MEMBER MY_INLINE uint64 sqRookMagicAttackTables(uint8 sq, uint64 index)
 {
 #ifdef __CUDA_ARCH__
     return __ldg(&gRookMagicAttackTables[sq][index]);
@@ -427,7 +435,7 @@ CUDA_CALLABLE_MEMBER __forceinline uint64 sqRookMagicAttackTables(uint8 sq, uint
 #endif
 }
 
-CUDA_CALLABLE_MEMBER __forceinline uint64 sqBishopMagicAttackTables(uint8 sq, uint64 index)
+CUDA_CALLABLE_MEMBER MY_INLINE uint64 sqBishopMagicAttackTables(uint8 sq, uint64 index)
 {
 #ifdef __CUDA_ARCH__
     return __ldg(&gBishopMagicAttackTables[sq][index]);
@@ -436,7 +444,7 @@ CUDA_CALLABLE_MEMBER __forceinline uint64 sqBishopMagicAttackTables(uint8 sq, ui
 #endif
 }
 
-CUDA_CALLABLE_MEMBER __forceinline uint64 sq_fancy_magic_lookup_table(int index)
+CUDA_CALLABLE_MEMBER MY_INLINE uint64 sq_fancy_magic_lookup_table(int index)
 {
 #ifdef __CUDA_ARCH__
     return __ldg(&g_fancy_magic_lookup_table[index]);
@@ -445,7 +453,7 @@ CUDA_CALLABLE_MEMBER __forceinline uint64 sq_fancy_magic_lookup_table(int index)
 #endif
 }
 
-CUDA_CALLABLE_MEMBER __forceinline FancyMagicEntry sq_bishop_magics_fancy(int sq)
+CUDA_CALLABLE_MEMBER MY_INLINE FancyMagicEntry sq_bishop_magics_fancy(int sq)
 {
 #ifdef __CUDA_ARCH__
     FancyMagicEntry op;
@@ -456,7 +464,7 @@ CUDA_CALLABLE_MEMBER __forceinline FancyMagicEntry sq_bishop_magics_fancy(int sq
 #endif
 }
 
-CUDA_CALLABLE_MEMBER __forceinline FancyMagicEntry sq_rook_magics_fancy(int sq)
+CUDA_CALLABLE_MEMBER MY_INLINE FancyMagicEntry sq_rook_magics_fancy(int sq)
 {
 #ifdef __CUDA_ARCH__
     FancyMagicEntry op;
@@ -467,7 +475,7 @@ CUDA_CALLABLE_MEMBER __forceinline FancyMagicEntry sq_rook_magics_fancy(int sq)
 #endif
 }
 
-CUDA_CALLABLE_MEMBER __forceinline uint8 sq_fancy_byte_magic_lookup_table(int index)
+CUDA_CALLABLE_MEMBER MY_INLINE uint8 sq_fancy_byte_magic_lookup_table(int index)
 {
 #ifdef __CUDA_ARCH__
     return __ldg(&g_fancy_byte_magic_lookup_table[index]);
@@ -476,7 +484,7 @@ CUDA_CALLABLE_MEMBER __forceinline uint8 sq_fancy_byte_magic_lookup_table(int in
 #endif
 }
 
-CUDA_CALLABLE_MEMBER __forceinline uint64 sq_fancy_byte_BishopLookup(int index)
+CUDA_CALLABLE_MEMBER MY_INLINE uint64 sq_fancy_byte_BishopLookup(int index)
 {
 #ifdef __CUDA_ARCH__
     return __ldg(&g_fancy_byte_BishopLookup[index]);
@@ -485,7 +493,7 @@ CUDA_CALLABLE_MEMBER __forceinline uint64 sq_fancy_byte_BishopLookup(int index)
 #endif
 }
 
-CUDA_CALLABLE_MEMBER __forceinline uint64 sq_fancy_byte_RookLookup(int index)
+CUDA_CALLABLE_MEMBER MY_INLINE uint64 sq_fancy_byte_RookLookup(int index)
 {
 #ifdef __CUDA_ARCH__
     return __ldg(&g_fancy_byte_RookLookup[index]);
@@ -500,42 +508,42 @@ public:
 
     // move the bits in the bitboard one square in the required direction
 
-    CUDA_CALLABLE_MEMBER __forceinline static uint64 northOne(uint64 x)
+    CUDA_CALLABLE_MEMBER MY_INLINE static uint64 northOne(uint64 x)
     {
         return x << 8;
     }
 
-    CUDA_CALLABLE_MEMBER __forceinline static uint64 southOne(uint64 x)
+    CUDA_CALLABLE_MEMBER MY_INLINE static uint64 southOne(uint64 x)
     {
         return x >> 8;
     }
 
-    CUDA_CALLABLE_MEMBER __forceinline static uint64 eastOne(uint64 x)
+    CUDA_CALLABLE_MEMBER MY_INLINE static uint64 eastOne(uint64 x)
     {
         return (x << 1) & (~FILEA);
     }
 
-    CUDA_CALLABLE_MEMBER __forceinline static uint64 westOne(uint64 x)
+    CUDA_CALLABLE_MEMBER MY_INLINE static uint64 westOne(uint64 x)
     {
         return (x >> 1) & (~FILEH);
     }
 
-    CUDA_CALLABLE_MEMBER __forceinline static uint64 northEastOne(uint64 x)
+    CUDA_CALLABLE_MEMBER MY_INLINE static uint64 northEastOne(uint64 x)
     {
         return (x << 9) & (~FILEA);
     }
 
-    CUDA_CALLABLE_MEMBER __forceinline static uint64 northWestOne(uint64 x)
+    CUDA_CALLABLE_MEMBER MY_INLINE static uint64 northWestOne(uint64 x)
     {
         return (x << 7) & (~FILEH);
     }
 
-    CUDA_CALLABLE_MEMBER __forceinline static uint64 southEastOne(uint64 x)
+    CUDA_CALLABLE_MEMBER MY_INLINE static uint64 southEastOne(uint64 x)
     {
         return (x >> 7) & (~FILEA);
     }
 
-    CUDA_CALLABLE_MEMBER __forceinline static uint64 southWestOne(uint64 x)
+    CUDA_CALLABLE_MEMBER MY_INLINE static uint64 southWestOne(uint64 x)
     {
         return (x >> 9) & (~FILEH);
     }
@@ -550,7 +558,7 @@ public:
 
     // uses kogge-stone algorithm
 
-    CUDA_CALLABLE_MEMBER __forceinline static uint64 northFill(uint64 gen, uint64 pro)
+    CUDA_CALLABLE_MEMBER MY_INLINE static uint64 northFill(uint64 gen, uint64 pro)
     {
         gen |= (gen << 8) & pro;
         pro &= (pro << 8);
@@ -561,7 +569,7 @@ public:
         return gen;
     }
 
-    CUDA_CALLABLE_MEMBER __forceinline static uint64 southFill(uint64 gen, uint64 pro)
+    CUDA_CALLABLE_MEMBER MY_INLINE static uint64 southFill(uint64 gen, uint64 pro)
     {
         gen |= (gen >> 8) & pro;
         pro &= (pro >> 8);
@@ -572,7 +580,7 @@ public:
         return gen;
     }
 
-    CUDA_CALLABLE_MEMBER __forceinline static uint64 eastFill(uint64 gen, uint64 pro)
+    CUDA_CALLABLE_MEMBER MY_INLINE static uint64 eastFill(uint64 gen, uint64 pro)
     {
         pro &= ~FILEA;
 
@@ -585,7 +593,7 @@ public:
         return gen;
     }
     
-    CUDA_CALLABLE_MEMBER __forceinline static uint64 westFill(uint64 gen, uint64 pro)
+    CUDA_CALLABLE_MEMBER MY_INLINE static uint64 westFill(uint64 gen, uint64 pro)
     {
         pro &= ~FILEH;
 
@@ -599,7 +607,7 @@ public:
     }
 
 
-    CUDA_CALLABLE_MEMBER __forceinline static uint64 northEastFill(uint64 gen, uint64 pro)
+    CUDA_CALLABLE_MEMBER MY_INLINE static uint64 northEastFill(uint64 gen, uint64 pro)
     {
         pro &= ~FILEA;
 
@@ -612,7 +620,7 @@ public:
         return gen;
     }
 
-    CUDA_CALLABLE_MEMBER __forceinline static uint64 northWestFill(uint64 gen, uint64 pro)
+    CUDA_CALLABLE_MEMBER MY_INLINE static uint64 northWestFill(uint64 gen, uint64 pro)
     {
         pro &= ~FILEH;
 
@@ -625,7 +633,7 @@ public:
         return gen;
     }
 
-    CUDA_CALLABLE_MEMBER __forceinline static uint64 southEastFill(uint64 gen, uint64 pro)
+    CUDA_CALLABLE_MEMBER MY_INLINE static uint64 southEastFill(uint64 gen, uint64 pro)
     {
         pro &= ~FILEA;
 
@@ -638,7 +646,7 @@ public:
         return gen;
     }
 
-    CUDA_CALLABLE_MEMBER __forceinline static uint64 southWestFill(uint64 gen, uint64 pro)
+    CUDA_CALLABLE_MEMBER MY_INLINE static uint64 southWestFill(uint64 gen, uint64 pro)
     {
         pro &= ~FILEH;
 
@@ -655,7 +663,7 @@ public:
     // attacks in the given direction
     // need to OR with ~(pieces of side to move) to avoid killing own pieces
 
-    CUDA_CALLABLE_MEMBER __forceinline static uint64 northAttacks(uint64 gen, uint64 pro)
+    CUDA_CALLABLE_MEMBER MY_INLINE static uint64 northAttacks(uint64 gen, uint64 pro)
     {
         gen |= (gen << 8) & pro;
         pro &= (pro << 8);
@@ -666,7 +674,7 @@ public:
         return gen << 8;
     }
 
-    CUDA_CALLABLE_MEMBER __forceinline static uint64 southAttacks(uint64 gen, uint64 pro)
+    CUDA_CALLABLE_MEMBER MY_INLINE static uint64 southAttacks(uint64 gen, uint64 pro)
     {
         gen |= (gen >> 8) & pro;
         pro &= (pro >> 8);
@@ -677,7 +685,7 @@ public:
         return gen >> 8;
     }
 
-    CUDA_CALLABLE_MEMBER __forceinline static uint64 eastAttacks(uint64 gen, uint64 pro)
+    CUDA_CALLABLE_MEMBER MY_INLINE static uint64 eastAttacks(uint64 gen, uint64 pro)
     {
         pro &= ~FILEA;
 
@@ -690,7 +698,7 @@ public:
         return (gen << 1) & (~FILEA);
     }
     
-    CUDA_CALLABLE_MEMBER __forceinline static uint64 westAttacks(uint64 gen, uint64 pro)
+    CUDA_CALLABLE_MEMBER MY_INLINE static uint64 westAttacks(uint64 gen, uint64 pro)
     {
         pro &= ~FILEH;
 
@@ -704,7 +712,7 @@ public:
     }
 
 
-    CUDA_CALLABLE_MEMBER __forceinline static uint64 northEastAttacks(uint64 gen, uint64 pro)
+    CUDA_CALLABLE_MEMBER MY_INLINE static uint64 northEastAttacks(uint64 gen, uint64 pro)
     {
         pro &= ~FILEA;
 
@@ -717,7 +725,7 @@ public:
         return (gen << 9) & (~FILEA);
     }
 
-    CUDA_CALLABLE_MEMBER __forceinline static uint64 northWestAttacks(uint64 gen, uint64 pro)
+    CUDA_CALLABLE_MEMBER MY_INLINE static uint64 northWestAttacks(uint64 gen, uint64 pro)
     {
         pro &= ~FILEH;
 
@@ -730,7 +738,7 @@ public:
         return (gen << 7) & (~FILEH);
     }
 
-    CUDA_CALLABLE_MEMBER __forceinline static uint64 southEastAttacks(uint64 gen, uint64 pro)
+    CUDA_CALLABLE_MEMBER MY_INLINE static uint64 southEastAttacks(uint64 gen, uint64 pro)
     {
         pro &= ~FILEA;
 
@@ -743,7 +751,7 @@ public:
         return (gen >> 7) & (~FILEA);
     }
 
-    CUDA_CALLABLE_MEMBER __forceinline static uint64 southWestAttacks(uint64 gen, uint64 pro)
+    CUDA_CALLABLE_MEMBER MY_INLINE static uint64 southWestAttacks(uint64 gen, uint64 pro)
     {
         pro &= ~FILEH;
 
@@ -760,7 +768,7 @@ public:
     // attacks by pieces of given type
     // pro - empty squares
 
-    CUDA_CALLABLE_MEMBER __forceinline static uint64 bishopAttacksKoggeStone(uint64 bishops, uint64 pro)
+    CUDA_CALLABLE_MEMBER MY_INLINE static uint64 bishopAttacksKoggeStone(uint64 bishops, uint64 pro)
     {
         return northEastAttacks(bishops, pro) |
                northWestAttacks(bishops, pro) |
@@ -768,7 +776,7 @@ public:
                southWestAttacks(bishops, pro) ;
     }
 
-    CUDA_CALLABLE_MEMBER __forceinline static uint64 rookAttacksKoggeStone(uint64 rooks, uint64 pro)
+    CUDA_CALLABLE_MEMBER MY_INLINE static uint64 rookAttacksKoggeStone(uint64 rooks, uint64 pro)
     {
         return northAttacks(rooks, pro) |
                southAttacks(rooks, pro) |
@@ -778,7 +786,7 @@ public:
 
 
 #if USE_SLIDING_LUT == 1
-    CUDA_CALLABLE_MEMBER __forceinline static uint64 bishopAttacks(uint64 bishop, uint64 pro)
+    CUDA_CALLABLE_MEMBER MY_INLINE static uint64 bishopAttacks(uint64 bishop, uint64 pro)
     {
         uint8 square = bitScan(bishop);
         uint64 occ = (~pro) & sqBishopAttacksMasked(square);
@@ -815,7 +823,7 @@ public:
 #endif // USE_FANCY_MAGICS == 1
     }
 
-    CUDA_CALLABLE_MEMBER __forceinline static uint64 rookAttacks(uint64 rook, uint64 pro)
+    CUDA_CALLABLE_MEMBER MY_INLINE static uint64 rookAttacks(uint64 rook, uint64 pro)
     {
         uint8 square = bitScan(rook);
         uint64 occ = (~pro) & sqRookAttacksMasked(square);
@@ -851,7 +859,7 @@ public:
 #endif
     }
 
-    CUDA_CALLABLE_MEMBER __forceinline static uint64 multiBishopAttacks(uint64 bishops, uint64 pro)
+    CUDA_CALLABLE_MEMBER MY_INLINE static uint64 multiBishopAttacks(uint64 bishops, uint64 pro)
     {
         uint64 attacks = 0;
         while(bishops)
@@ -864,7 +872,7 @@ public:
         return attacks;
     }
 
-    CUDA_CALLABLE_MEMBER __forceinline static uint64 multiRookAttacks(uint64 rooks, uint64 pro)
+    CUDA_CALLABLE_MEMBER MY_INLINE static uint64 multiRookAttacks(uint64 rooks, uint64 pro)
     {
         uint64 attacks = 0;
         while(rooks)
@@ -888,14 +896,14 @@ public:
 
 // not used
 #if 0
-    CUDA_CALLABLE_MEMBER __forceinline static uint64 queenAttacks(uint64 queens, uint64 pro)
+    CUDA_CALLABLE_MEMBER MY_INLINE static uint64 queenAttacks(uint64 queens, uint64 pro)
     {
         return rookAttacks  (queens, pro) |
                bishopAttacks(queens, pro) ;
     }
 #endif
 
-    CUDA_CALLABLE_MEMBER __forceinline static uint64 kingAttacks(uint64 kingSet) 
+    CUDA_CALLABLE_MEMBER MY_INLINE static uint64 kingAttacks(uint64 kingSet) 
     {
         uint64 attacks = eastOne(kingSet) | westOne(kingSet);
         kingSet       |= attacks;
@@ -905,7 +913,7 @@ public:
 
     // efficient knight attack generator
     // http://chessprogramming.wikispaces.com/Knight+Pattern
-    CUDA_CALLABLE_MEMBER __forceinline static uint64 knightAttacks(uint64 knights) {
+    CUDA_CALLABLE_MEMBER MY_INLINE static uint64 knightAttacks(uint64 knights) {
         uint64 l1 = (knights >> 1) & C64(0x7f7f7f7f7f7f7f7f);
         uint64 l2 = (knights >> 2) & C64(0x3f3f3f3f3f3f3f3f);
         uint64 r1 = (knights << 1) & C64(0xfefefefefefefefe);
@@ -919,17 +927,17 @@ public:
 
     // gets one bit (the LSB) from a bitboard
     // returns a bitboard containing that bit
-    CUDA_CALLABLE_MEMBER __forceinline static uint64 getOne(uint64 x)
+    CUDA_CALLABLE_MEMBER MY_INLINE static uint64 getOne(uint64 x)
     {
         return x & (-x);
     }
 
-    CUDA_CALLABLE_MEMBER __forceinline static bool isMultiple(uint64 x)
+    CUDA_CALLABLE_MEMBER MY_INLINE static bool isMultiple(uint64 x)
     {
         return x ^ getOne(x);
     }
 
-    CUDA_CALLABLE_MEMBER __forceinline static bool isSingular(uint64 x)
+    CUDA_CALLABLE_MEMBER MY_INLINE static bool isSingular(uint64 x)
     {
         return !isMultiple(x); 
     }
@@ -938,7 +946,7 @@ public:
     // finds the squares in between the two given squares
     // taken from 
     // http://chessprogramming.wikispaces.com/Square+Attacked+By#Legality Test-In Between-Pure Calculation
-    CUDA_CALLABLE_MEMBER __forceinline static uint64 squaresInBetween(uint8 sq1, uint8 sq2)
+    CUDA_CALLABLE_MEMBER MY_INLINE static uint64 squaresInBetween(uint8 sq1, uint8 sq2)
     {
         const uint64 m1   = C64(0xFFFFFFFFFFFFFFFF);
         const uint64 a2a7 = C64(0x0001010101010100);
@@ -958,7 +966,7 @@ public:
     }
 
     // returns the 'line' containing all pieces in the same file/rank/diagonal or anti-diagonal containing sq1 and sq2
-    CUDA_CALLABLE_MEMBER __forceinline static uint64 squaresInLine(uint8 sq1, uint8 sq2)
+    CUDA_CALLABLE_MEMBER MY_INLINE static uint64 squaresInLine(uint8 sq1, uint8 sq2)
     {
         // TODO: try to make it branchless?
         int fileDiff  =   (sq2 & 7) - (sq1 & 7);
@@ -997,7 +1005,7 @@ public:
     }
 
 
-    CUDA_CALLABLE_MEMBER __forceinline static uint64 sqsInBetween(uint8 sq1, uint8 sq2)
+    CUDA_CALLABLE_MEMBER MY_INLINE static uint64 sqsInBetween(uint8 sq1, uint8 sq2)
     {
 #if USE_IN_BETWEEN_LUT == 1
         return sqsInBetweenLUT(sq1, sq2);
@@ -1006,7 +1014,7 @@ public:
 #endif
     }
 
-    CUDA_CALLABLE_MEMBER __forceinline static uint64 sqsInLine(uint8 sq1, uint8 sq2)
+    CUDA_CALLABLE_MEMBER MY_INLINE static uint64 sqsInLine(uint8 sq1, uint8 sq2)
     {
 #if USE_IN_BETWEEN_LUT == 1
         return sqsInLineLUT(sq1, sq2);
@@ -1214,7 +1222,7 @@ public:
     }
 
 
-    CUDA_CALLABLE_MEMBER static __forceinline uint64 findPinnedPieces (uint64 myKing, uint64 myPieces, uint64 enemyBishops, uint64 enemyRooks, uint64 allPieces, uint8 kingIndex)
+    CUDA_CALLABLE_MEMBER static MY_INLINE uint64 findPinnedPieces (uint64 myKing, uint64 myPieces, uint64 enemyBishops, uint64 enemyRooks, uint64 allPieces, uint8 kingIndex)
     {
         // check for sliding attacks to the king's square
 
@@ -1255,7 +1263,7 @@ public:
     // returns bitmask of squares in threat by enemy pieces
     // the king shouldn't ever attempt to move to a threatened square
     // TODO: maybe make this tempelated on color?
-    CUDA_CALLABLE_MEMBER __forceinline static uint64 findAttackedSquares(uint64 emptySquares, uint64 enemyBishops, uint64 enemyRooks, 
+    CUDA_CALLABLE_MEMBER MY_INLINE static uint64 findAttackedSquares(uint64 emptySquares, uint64 enemyBishops, uint64 enemyRooks, 
                                       uint64 enemyPawns, uint64 enemyKnights, uint64 enemyKing, 
                                       uint64 myKing, uint8 enemyColor)
     {
@@ -1294,7 +1302,7 @@ public:
 
 
     // adds the given board to list and increments the move counter
-    CUDA_CALLABLE_MEMBER __forceinline static void addMove(uint32 *nMoves, HexaBitBoardPosition **newPos, HexaBitBoardPosition *newBoard)
+    CUDA_CALLABLE_MEMBER MY_INLINE static void addMove(uint32 *nMoves, HexaBitBoardPosition **newPos, HexaBitBoardPosition *newBoard)
     {
         **newPos = *newBoard;
         (*newPos)++;
@@ -1302,7 +1310,7 @@ public:
     }
 
 
-    CUDA_CALLABLE_MEMBER __forceinline static void updateCastleFlag(HexaBitBoardPosition *pos, uint64 dst, uint8 chance)
+    CUDA_CALLABLE_MEMBER MY_INLINE static void updateCastleFlag(HexaBitBoardPosition *pos, uint64 dst, uint8 chance)
     {
 
 #if USE_BITWISE_MAGIC_FOR_CASTLE_FLAG_UPDATION == 1
@@ -1334,7 +1342,7 @@ public:
 #endif
     }
 
-    CUDA_CALLABLE_MEMBER __forceinline static void addSlidingMove(uint32 *nMoves, HexaBitBoardPosition **newPos, HexaBitBoardPosition *pos,
+    CUDA_CALLABLE_MEMBER MY_INLINE static void addSlidingMove(uint32 *nMoves, HexaBitBoardPosition **newPos, HexaBitBoardPosition *pos,
                                              uint64 src, uint64 dst, uint8 chance)
     {
 
@@ -1394,7 +1402,7 @@ public:
     }
 
 
-    CUDA_CALLABLE_MEMBER __forceinline static void addKnightMove(uint32 *nMoves, HexaBitBoardPosition **newPos, HexaBitBoardPosition *pos,
+    CUDA_CALLABLE_MEMBER MY_INLINE static void addKnightMove(uint32 *nMoves, HexaBitBoardPosition **newPos, HexaBitBoardPosition *pos,
                                             uint64 src, uint64 dst, uint8 chance)
     {
 #if DEBUG_PRINT_MOVES == 1
@@ -1439,7 +1447,7 @@ public:
     }
 
 
-    CUDA_CALLABLE_MEMBER __forceinline static void addKingMove(uint32 *nMoves, HexaBitBoardPosition **newPos, HexaBitBoardPosition *pos,
+    CUDA_CALLABLE_MEMBER MY_INLINE static void addKingMove(uint32 *nMoves, HexaBitBoardPosition **newPos, HexaBitBoardPosition *pos,
                                           uint64 src, uint64 dst, uint8 chance)
     {
 #if DEBUG_PRINT_MOVES == 1
@@ -1486,7 +1494,7 @@ public:
     }
 
 
-    CUDA_CALLABLE_MEMBER __forceinline static void addCastleMove(uint32 *nMoves, HexaBitBoardPosition **newPos, HexaBitBoardPosition *pos,
+    CUDA_CALLABLE_MEMBER MY_INLINE static void addCastleMove(uint32 *nMoves, HexaBitBoardPosition **newPos, HexaBitBoardPosition *pos,
                                             uint64 kingFrom, uint64 kingTo, uint64 rookFrom, uint64 rookTo, uint8 chance)
     {
 #if DEBUG_PRINT_MOVES == 1
@@ -1529,7 +1537,7 @@ public:
 
     // only for normal moves
     // promotions and en-passent handled in seperate functions
-    CUDA_CALLABLE_MEMBER __forceinline static void addSinglePawnMove(uint32 *nMoves, HexaBitBoardPosition **newPos, HexaBitBoardPosition *pos,
+    CUDA_CALLABLE_MEMBER MY_INLINE static void addSinglePawnMove(uint32 *nMoves, HexaBitBoardPosition **newPos, HexaBitBoardPosition *pos,
                                                uint64 src, uint64 dst, uint8 chance, bool doublePush, uint8 pawnIndex)
     {
 #if DEBUG_PRINT_MOVES == 1
@@ -1630,7 +1638,7 @@ public:
 
     // adds promotions if at promotion square
     // or normal pawn moves if not promotion. Never called for double pawn push (the above function is called directly)
-    CUDA_CALLABLE_MEMBER __forceinline static void addPawnMoves(uint32 *nMoves, HexaBitBoardPosition **newPos, HexaBitBoardPosition *pos,
+    CUDA_CALLABLE_MEMBER MY_INLINE static void addPawnMoves(uint32 *nMoves, HexaBitBoardPosition **newPos, HexaBitBoardPosition *pos,
                                            uint64 src, uint64 dst, uint8 chance)
     {
         // promotion
@@ -1704,7 +1712,7 @@ public:
     }
 
 
-    CUDA_CALLABLE_MEMBER __forceinline static void addCompactMove(uint32 *nMoves, CMove **genMoves, uint8 from, uint8 to, uint8 flags)
+    CUDA_CALLABLE_MEMBER MY_INLINE static void addCompactMove(uint32 *nMoves, CMove **genMoves, uint8 from, uint8 to, uint8 flags)
     {
         CMove move(from, to, flags);
         **genMoves = move;
@@ -1715,7 +1723,7 @@ public:
 
     // adds promotions if at promotion square
     // or normal pawn moves if not promotion
-    CUDA_CALLABLE_MEMBER __forceinline static void addCompactPawnMoves(uint32 *nMoves, CMove **genMoves, uint8 from, uint64 dst, uint8 flags)
+    CUDA_CALLABLE_MEMBER MY_INLINE static void addCompactPawnMoves(uint32 *nMoves, CMove **genMoves, uint8 from, uint64 dst, uint8 flags)
     {
         uint8 to = bitScan(dst); 
         // promotion
@@ -1736,7 +1744,7 @@ public:
 #if USE_TEMPLATE_CHANCE_OPT == 1
     template<uint8 chance>
 #endif
-    CUDA_CALLABLE_MEMBER __forceinline static uint32 generateBoardsOutOfCheck (HexaBitBoardPosition *pos, HexaBitBoardPosition *newPositions,
+    CUDA_CALLABLE_MEMBER MY_INLINE static uint32 generateBoardsOutOfCheck (HexaBitBoardPosition *pos, HexaBitBoardPosition *newPositions,
                                            uint64 allPawns, uint64 allPieces, uint64 myPieces,
                                            uint64 enemyPieces, uint64 pinned, uint64 threatened, 
                                            uint8 kingIndex
@@ -2294,7 +2302,7 @@ public:
 #if USE_TEMPLATE_CHANCE_OPT == 1
     template<uint8 chance>
 #endif
-    CUDA_CALLABLE_MEMBER __forceinline static uint32 generateMovesOutOfCheck (HexaBitBoardPosition *pos, CMove *genMoves,
+    CUDA_CALLABLE_MEMBER MY_INLINE static uint32 generateMovesOutOfCheck (HexaBitBoardPosition *pos, CMove *genMoves,
                                            uint64 allPawns, uint64 allPieces, uint64 myPieces,
                                            uint64 enemyPieces, uint64 pinned, uint64 threatened, 
                                            uint8 kingIndex
@@ -2854,9 +2862,9 @@ public:
 
 #if USE_TEMPLATE_CHANCE_OPT == 1
     template<uint8 chance>
-    CUDA_CALLABLE_MEMBER __forceinline static void makeMove (HexaBitBoardPosition *pos, uint64 &hash, CMove move)
+    CUDA_CALLABLE_MEMBER MY_INLINE static void makeMove (HexaBitBoardPosition *pos, uint64 &hash, CMove move)
 #else
-    CUDA_CALLABLE_MEMBER __forceinline static void makeMove (HexaBitBoardPosition *pos, uint64 &hash, CMove move, uint8 chance)
+    CUDA_CALLABLE_MEMBER MY_INLINE static void makeMove (HexaBitBoardPosition *pos, uint64 &hash, CMove move, uint8 chance)
 #endif
     {
 #if DEBUG_INCREMENTAL_ZOBRIST_UPDATE == 1
@@ -3118,7 +3126,7 @@ public:
 #if USE_TEMPLATE_CHANCE_OPT == 1
     template<uint8 chance>
 #endif
-    CUDA_CALLABLE_MEMBER __forceinline static uint32 countMovesOutOfCheck (HexaBitBoardPosition *pos,
+    CUDA_CALLABLE_MEMBER MY_INLINE static uint32 countMovesOutOfCheck (HexaBitBoardPosition *pos,
                                            uint64 allPawns, uint64 allPieces, uint64 myPieces,
                                            uint64 enemyPieces, uint64 pinned, uint64 threatened, 
                                            uint8 kingIndex
@@ -3975,7 +3983,7 @@ uint32 generateMoves(HexaBitBoardPosition *pos, CMove *genMoves)
     return nMoves;
 }
 
-__forceinline void makeMove(HexaBitBoardPosition *newPos, uint64 &hash, CMove move, uint8 chance)
+MY_INLINE void makeMove(HexaBitBoardPosition *newPos, uint64 &hash, CMove move, uint8 chance)
 {
 
 #if DEBUG_PRINT_TIME_BREAKUP == 1
@@ -4008,13 +4016,13 @@ __forceinline void makeMove(HexaBitBoardPosition *newPos, uint64 &hash, CMove mo
 
 #if USE_TRANSPOSITION_TABLE == 1
 // look up the transposition table for an entry
-__forceinline TT_Entry lookupTT(uint64 hash)
+MY_INLINE TT_Entry lookupTT(uint64 hash)
 {
     return TranspositionTable[hash & (TT_INDEX_BITS)];
 }
 
 // check if the given position is present in transposition table entry
-__forceinline bool searchTTEntry(TT_Entry &entry, uint64 hash, uint64 *perft)
+MY_INLINE bool searchTTEntry(TT_Entry &entry, uint64 hash, uint64 *perft)
 {
 #if USE_DUAL_SLOT_TT == 1
     if ((entry.mostRecent.hashKey & TT_HASH_BITS) == (hash & TT_HASH_BITS))
@@ -4038,7 +4046,7 @@ __forceinline bool searchTTEntry(TT_Entry &entry, uint64 hash, uint64 *perft)
     return false;
 }
 
-__forceinline void storeTTEntry(TT_Entry &entry, uint64 hash, int depth, uint64 count, HexaBitBoardPosition *pos)
+MY_INLINE void storeTTEntry(TT_Entry &entry, uint64 hash, int depth, uint64 count, HexaBitBoardPosition *pos)
 {
 #if USE_DUAL_SLOT_TT == 1
 

@@ -66,7 +66,7 @@ int main()
     printf("\nEnter FEN String: \n");
     char fen[1024];
     gets(fen);
-    Utils::readFENString(fen, &testBoard); // start.. 20 positions
+    Utils::readFENString(fen, &testBoard); 
     Utils::dispBoard(&testBoard);
 
     HexaBitBoardPosition testBB;

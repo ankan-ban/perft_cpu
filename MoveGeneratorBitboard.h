@@ -45,6 +45,9 @@
 // make use of transposition table even at the leaves
 #define USE_TRANSPOSITION_AT_LEAVES 0
 
+// make use of lockless hash table (required when running multi-threaded perft)
+#define USE_LOCKLESS_HASH 1
+
 // size of transposition table (in number of entries)
 // must be a power of two
 // each entry is of 16 bytes
@@ -871,7 +874,7 @@ public:
 
         return attacks;
     }
-
+	
     CUDA_CALLABLE_MEMBER MY_INLINE static uint64 multiRookAttacks(uint64 rooks, uint64 pro)
     {
         uint64 attacks = 0;
@@ -884,6 +887,7 @@ public:
 
         return attacks;
     }
+
 #else
 // kogge stone handles multiple attackers automatically
 
@@ -893,6 +897,19 @@ public:
 #define multiBishopAttacks bishopAttacksKoggeStone
 #define multiRookAttacks   rookAttacksKoggeStone
 #endif
+
+CUDA_CALLABLE_MEMBER MY_INLINE static uint64 multiKnightAttacks(uint64 knights)
+{
+	uint64 attacks = 0;
+	while(knights)
+	{
+		uint64 knight = getOne(knights);
+		attacks |= sqKnightAttacks(bitScan(knight));
+		knights ^= knight;
+	}
+	return attacks;
+}
+
 
 // not used
 #if 0
@@ -1282,7 +1299,11 @@ public:
         }
 
         // 2. knight attacks
-        attacked |= knightAttacks(enemyKnights);
+#if USE_KNIGHT_LUT == 1
+        attacked |= multiKnightAttacks(enemyKnights); // again a tiny bit faster
+#else
+        attacked |= knightAttacks(enemyKnights);	
+#endif
         
         // 3. bishop attacks
         attacked |= multiBishopAttacks(enemyBishops, emptySquares | myKing); // squares behind king are also under threat (in the sense that king can't go there)
@@ -1291,12 +1312,16 @@ public:
         attacked |= multiRookAttacks(enemyRooks, emptySquares | myKing); // squares behind king are also under threat
 
         // 5. King attacks
+#if USE_KING_LUT == 1
+        attacked |= sqKingAttacks(bitScan(enemyKing));	// a very tiny bit faster!
+#else
         attacked |= kingAttacks(enemyKing);
+#endif
         
         // TODO: 
         // 1. figure out if we really need to mask off pieces on board
         //  - actually it seems better not to.. so that we can easily check if a capture move takes the king to check
-        // 2. It might be faster to use the lookup table instead of computing (esp for king and knights)
+        // 2. It might be faster to use the lookup table instead of computing (esp for king and knights).. DONE!
         return attacked/*& (emptySquares)*/;
     }
 
@@ -4025,18 +4050,30 @@ MY_INLINE TT_Entry lookupTT(uint64 hash)
 MY_INLINE bool searchTTEntry(TT_Entry &entry, uint64 hash, uint64 *perft)
 {
 #if USE_DUAL_SLOT_TT == 1
+#if USE_LOCKLESS_HASH == 1
+    if (((entry.mostRecent.hashKey ^ entry.mostRecent.perftVal) & TT_HASH_BITS) == (hash & TT_HASH_BITS))
+#else
     if ((entry.mostRecent.hashKey & TT_HASH_BITS) == (hash & TT_HASH_BITS))
+#endif
     {
         *perft = entry.mostRecent.perftVal;
         return true;
     }
+#if USE_LOCKLESS_HASH == 1
+    if (((entry.deepest.hashKey ^ entry.deepest.perftVal) & TT_HASH_BITS) == (hash & TT_HASH_BITS))
+#else
     if ((entry.deepest.hashKey & TT_HASH_BITS) == (hash & TT_HASH_BITS))
+#endif
     {
         *perft = entry.deepest.perftVal;
         return true;
     }
 #else
+#if USE_LOCKLESS_HASH == 1
+    if (((entry.hashKey ^ entry.perftVal) & TT_HASH_BITS) == (hash & TT_HASH_BITS))
+#else
     if ((entry.hashKey & TT_HASH_BITS) == (hash & TT_HASH_BITS))
+#endif
     {
         *perft = entry.perftVal;
         return true;
@@ -4062,6 +4099,9 @@ MY_INLINE void storeTTEntry(TT_Entry &entry, uint64 hash, int depth, uint64 coun
         entry.deepest.perftVal = count;
         entry.deepest.hashKey = hash;
         entry.deepest.depth = depth;
+#if USE_LOCKLESS_HASH == 1
+        entry.deepest.hashKey ^= count;
+#endif
         TranspositionTable[hash & (TT_INDEX_BITS)] = entry;
     }
     else
@@ -4070,6 +4110,9 @@ MY_INLINE void storeTTEntry(TT_Entry &entry, uint64 hash, int depth, uint64 coun
         entry.mostRecent.perftVal = count;
         entry.mostRecent.hashKey = hash;
         entry.mostRecent.depth = depth;
+#if USE_LOCKLESS_HASH == 1
+        entry.mostRecent.hashKey ^= count;
+#endif
         TranspositionTable[hash & (TT_INDEX_BITS)] = entry;
     }
 #else
@@ -4079,6 +4122,10 @@ MY_INLINE void storeTTEntry(TT_Entry &entry, uint64 hash, int depth, uint64 coun
         entry.perftVal = count;
         entry.hashKey = hash;
         entry.depth = depth;
+#if USE_LOCKLESS_HASH == 1
+        entry.hashKey ^= count;
+#endif
+
 #if DEBUG_CATCH_HASH_COLLISIONS == 1
         entry.pos = *pos;
 #endif

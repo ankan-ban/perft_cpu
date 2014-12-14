@@ -3,6 +3,8 @@
 #include "MoveGenerator088.h"
 #include "MoveGeneratorBitboard.h"
 
+#include <windows.h>
+
 // for timing CPU code : start
 double gTime;
 LARGE_INTEGER freq;
@@ -17,13 +19,193 @@ LARGE_INTEGER freq;
     }
 // for timing CPU code : end
 
+void removeNewLine(char *str)
+{
+    while (*str)
+    {
+        if (*str == '\n' || *str == '\r')
+        {
+            *str = 0;
+            break;
+        }
+        str++;
+    }
+}
 
 
-int main()
+// a complete work unit is read and written at once (not very big... ~50 MB max)
+#define MAX_THREADS 1024
+#define MAX_RECORDS 100000
+#define MAX_RECORD_SIZE 256
+
+struct perft14wu
+{
+    char input[MAX_RECORDS][MAX_RECORD_SIZE];
+    char output[MAX_RECORDS][MAX_RECORD_SIZE];
+
+    volatile unsigned int nextRecord;
+    unsigned int totalRecords;
+    unsigned int preProcessedRecords;
+
+    // most recent record processed by each thread
+    volatile int mostRecentProcessed[MAX_THREADS];
+} g_WorkUnit;
+
+clock_t start, end;
+
+DWORD WINAPI workerThread(LPVOID lpParam)
 {
     BoardPosition testBoard;
+    int threadIndex = (int) lpParam;
+    
+    while (true)
+    {
+        int recordIdToProcess = InterlockedIncrement(&g_WorkUnit.nextRecord);
 
+        // done ?
+        if (recordIdToProcess >= g_WorkUnit.totalRecords)
+            break;
+
+        char *line = g_WorkUnit.input[recordIdToProcess];
+
+        Utils::readFENString(line, &testBoard);
+        HexaBitBoardPosition testBB;
+
+        //Utils::dispBoard(&testBoard);
+
+
+        Utils::board088ToHexBB(&testBB, &testBoard);
+
+        uint64 res = perft_bb(&testBB, 0, 7);
+
+        // write to output file
+        removeNewLine(line);
+
+        // parse the occurence count (last number in the line)
+        char *ptr = line;
+        while (*ptr) ptr++;
+        while (*ptr != ' ') ptr--;
+        int occCount = atoi(ptr);
+
+        sprintf(g_WorkUnit.output[recordIdToProcess], "%s %llu %llu\n", line, res, res * occCount);
+
+        end = clock();
+        double t = ((double)end - start) / CLOCKS_PER_SEC;
+        printf("\nTID: %d: record id: %d\n%sRecords done: %d, Total: %g seconds, Avg: %g seconds\n", threadIndex, recordIdToProcess,
+                    g_WorkUnit.output[recordIdToProcess], 
+                    recordIdToProcess + g_WorkUnit.preProcessedRecords + 1,
+                    t, t / (recordIdToProcess+1));
+
+        fflush(stdout);
+
+        g_WorkUnit.mostRecentProcessed[threadIndex] = recordIdToProcess;
+
+    }
+
+    return 0;
+}
+
+
+int main(int argc, char *argv[])
+{
+    BoardPosition testBoard;
     MoveGeneratorBitboard::init();
+
+    if (argc >= 2)
+    {
+        // perft verification mode
+
+        FILE *fpInp;    // input file
+        FILE *fpOp;     // output file
+        int startRecord = 0;
+
+        char opFile[1024];
+        sprintf(opFile, "%s.op", argv[1]);
+        printf("filename of op: %s", opFile);
+
+        fpInp = fopen(argv[1], "rb+");
+        fpOp = fopen(opFile, "ab+");
+
+        fseek(fpOp, 0, SEEK_SET);
+
+        start = clock();
+
+        char line[MAX_RECORD_SIZE];
+
+        int j = 0;  // records to process
+        int k = 0;  // already processed records
+
+        printf("\nReading input file...\n");
+        while (fgets(line, MAX_RECORD_SIZE, fpInp))
+        {
+            if (fgets(opFile, MAX_RECORD_SIZE, fpOp))
+            {
+                k++;
+                // skip already processed records
+                continue;
+            }
+            strcpy(g_WorkUnit.input[j], line);
+            j++;
+        }
+        fclose(fpInp);
+
+        g_WorkUnit.totalRecords = j;
+        g_WorkUnit.nextRecord = -1;    // first interlockedIncrement will return incremented value
+        g_WorkUnit.preProcessedRecords = k;
+
+        printf("\nTotal: %d, processed: %d\n", g_WorkUnit.totalRecords, g_WorkUnit.preProcessedRecords);
+
+        // create multiple threads to distribute the work
+        HANDLE childThreads[MAX_THREADS];
+        int numThreads = 7;
+        if (argc >= 3)
+            numThreads = atoi(argv[2]);
+        if (numThreads < 1 || numThreads > MAX_THREADS)
+            numThreads = 7;
+
+        printf("\nlaunching %d threads...\n", numThreads);
+        for (int i = 0; i < numThreads; i++)
+        {
+            childThreads[i] = CreateThread(NULL, 0, workerThread, (LPVOID)i, 0, NULL);
+        }
+
+        // Wait until all threads have terminated.
+        printf("\nWaiting for child threads to finish...\n");
+
+        int lastRecordWritten = 0;
+        while (WaitForMultipleObjects(numThreads, childThreads, TRUE, /*INFINITE*/ 1000) == WAIT_TIMEOUT)
+        {
+            // write output records every 1 second
+
+            // figure out lowest completed index
+            int minIndex = g_WorkUnit.totalRecords;
+            for (int i = 0; i < numThreads; i++)
+            {
+                int threadRecent = g_WorkUnit.mostRecentProcessed[i];
+                if (threadRecent < minIndex)
+                    minIndex = threadRecent;
+            }
+
+            for (int i = lastRecordWritten; i < minIndex; i++)
+            {
+                // printf("\nWriting record: %d\n", i);
+                fprintf(fpOp, "%s", g_WorkUnit.output[i]);
+                fflush(fpOp);
+            }
+
+            lastRecordWritten = minIndex;
+        }
+
+        // write remaining records
+        for (int i = lastRecordWritten; i < g_WorkUnit.totalRecords; i++)
+        {
+            fprintf(fpOp, "%s", g_WorkUnit.output[i]);
+            fflush(fpOp);
+        }
+
+        fclose(fpOp);
+        return 0;
+    }
 
     // some test board positions from http://chessprogramming.wikispaces.com/Perft+Results
 

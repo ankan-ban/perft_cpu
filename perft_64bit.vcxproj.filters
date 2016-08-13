@@ -30,6 +30,9 @@
     <ClInclude Include="randoms.h">
       <Filter>Source Files</Filter>
     </ClInclude>
+    <ClInclude Include="uniques.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="perft.cpp">

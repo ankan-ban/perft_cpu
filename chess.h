@@ -196,25 +196,22 @@ struct Move
 };
 CT_ASSERT(sizeof(Move) == 4);
 
-
-// position of the board in bit-board representation
-struct QuadBitBoardPosition
+// a more compact quad bit board structure for storing chess positions
+// taken from the chess programming wiki:
+// https://chessprogramming.wikispaces.com/Quad-Bitboards
+// Note that game state  is stored seperately
+union QuadBitBoardPosition
 {
-    // 32 bytes of dense bitboard data
-    uint64   black;   // 1 - black, 0 - white/empty
-    uint64   PBQ;     // pawns, bishops and queens
-    uint64   NB;      // knights and bishops
-    uint64   RQK;     // rooks, queens and kings
-
-    // 8 bytes of state / free space
-    uint8    chance;            // whose move it is
-    uint8    whiteCastle;       // whether white can castle
-    uint8    blackCastle;       // whether black can castle
-    uint8    enPassent;         // col + 1 (where col is the file on which enpassent is possible)
-    uint8    halfMoveCounter;   // to detect 50 move draw rule
-    uint8    padding[3];        // free space to store additional info if needed
+    struct
+    {
+        uint64 black;
+        uint64 pbq;
+        uint64 nb;
+        uint64 rqk;
+    };
+    uint64 bb[4];
 };
-CT_ASSERT(sizeof(QuadBitBoardPosition) == 40);
+CT_ASSERT(sizeof(QuadBitBoardPosition) == 32);
 
 // another bit-board based board representation using 6 bitboards
 struct HexaBitBoardPosition

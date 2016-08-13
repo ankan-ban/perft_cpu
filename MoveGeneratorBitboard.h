@@ -27,7 +27,9 @@
 #define USE_MOVE_LIST 0
 
 // make use of a hash table to avoid duplicate calculations due to transpositions
-#define USE_TRANSPOSITION_TABLE 1
+#define USE_TRANSPOSITION_TABLE 0
+
+#define EXACT_EN_PASSENT_FLAGGING 1
 
 #if USE_TRANSPOSITION_TABLE == 1
 
@@ -118,7 +120,7 @@
 // plain magics is a bit faster at least for perft (on core 2 duo)
 // fancy magics is clearly faster on more recent processors (ivy bridge)
 // intel compiler with haswell clearly like plain magics (~7% perf gain over fancy)
-#define USE_FANCY_MAGICS 0
+#define USE_FANCY_MAGICS 1
 
 // use byte lookup for fancy magics (~150 KB lookup tables)
 // >10% slower than fixed shift fancy magics on both CPU and GPU
@@ -287,6 +289,8 @@ uint64 findBishopMagicForSquare(int square, uint64 magicAttackTable[], uint64 ma
 
 // set of random numbers for zobrist hashing
 static ZobristRandoms zob;
+static ZobristRandoms zob2;
+
 
 #if USE_DUAL_SLOT_TT == 1
 #define TT_Entry DualHashEntry
@@ -1044,7 +1048,8 @@ CUDA_CALLABLE_MEMBER MY_INLINE static uint64 multiKnightAttacks(uint64 knights)
     static void init()
     {
         // initialize zobrist keys
-        memcpy(&zob, &randoms[777], sizeof(zob));
+        memcpy(&zob, &randoms[77], sizeof(zob));
+        memcpy(&zob2, &randoms[1077], sizeof(zob2));
 
         // allocate the transposition table
 #if USE_TRANSPOSITION_TABLE == 1
@@ -1989,7 +1994,7 @@ CUDA_CALLABLE_MEMBER MY_INLINE static uint64 multiKnightAttacks(uint64 knights)
         uint64 myKing     = pos->kings & myPieces;
         uint8  kingIndex  = bitScan(myKing);
 
-        uint64 pinned     = findPinnedPieces(pos->kings & myPieces, myPieces, enemyBishops, enemyRooks, allPieces, kingIndex);
+        uint64 pinned     = findPinnedPieces(myKing, myPieces, enemyBishops, enemyRooks, allPieces, kingIndex);
 
         uint64 threatened = findAttackedSquares(~allPieces, enemyBishops, enemyRooks, allPawns & enemyPieces, 
                                                 pos->knights & enemyPieces, pos->kings & enemyPieces, 
@@ -2550,7 +2555,7 @@ CUDA_CALLABLE_MEMBER MY_INLINE static uint64 multiKnightAttacks(uint64 knights)
         uint64 myKing     = pos->kings & myPieces;
         uint8  kingIndex  = bitScan(myKing);
 
-        uint64 pinned     = findPinnedPieces(pos->kings & myPieces, myPieces, enemyBishops, enemyRooks, allPieces, kingIndex);
+        uint64 pinned     = findPinnedPieces(myKing, myPieces, enemyBishops, enemyRooks, allPieces, kingIndex);
 
         uint64 threatened = findAttackedSquares(~allPieces, enemyBishops, enemyRooks, allPawns & enemyPieces, 
                                                 pos->knights & enemyPieces, pos->kings & enemyPieces, 
@@ -3107,7 +3112,81 @@ CUDA_CALLABLE_MEMBER MY_INLINE static uint64 multiKnightAttacks(uint64 knights)
 
         if (move.getFlags() == CM_FLAG_DOUBLE_PAWN_PUSH)
         {
-            pos->enPassent = (move.getFrom() & 7) + 1;      // store file + 1
+#if EXACT_EN_PASSENT_FLAGGING == 1
+            // only mark en-passent if there actually is a en-passent capture possible in next move
+            uint64 allPawns = pos->pawns & RANKS2TO7;    // get rid of game state variables
+            uint64 allPieces = pos->kings | allPawns | pos->knights | pos->bishopQueens | pos->rookQueens;
+            uint64 blackPieces = allPieces & (~pos->whitePieces);
+            uint64 enemyPieces = (chance == WHITE) ? blackPieces : pos->whitePieces;
+            uint64 enemyPawns = allPawns & enemyPieces;
+            uint64 myPieces = (chance == WHITE) ? pos->whitePieces : blackPieces;
+
+            uint64 myBishops = pos->bishopQueens & myPieces;
+            uint64 myRooks = pos->rookQueens & myPieces;
+
+            uint64 enemyKing = pos->kings & enemyPieces;
+            uint8  enemyKingIndex = bitScan(enemyKing);
+
+            // possible enemy pieces that can do en-passent capture in next move
+            uint64 epSources = (eastOne(dst) | westOne(dst)) & enemyPawns;
+
+            // JUST CHECKING epSources IS NOT ENOUGH, see https://oeis.org/A083276
+            // This differs from A057745 at 6 ply and above because where an en passant capture would be illegal, 
+            // the position is essentially the same as where an en passant capture is not available. 
+            // It is two less than A057745 at 6 ply because the positions after 1. f4 e6/e5 2. Kf2 Qf6 3. f5 g5 
+            // are considered to be the same as after 1. f4 g5 2. Kf2 e6/e5 3. f5 Qf6.
+            bool epLegal = false;
+            uint64 pinned = 0;
+            uint64 enPassentTarget = 0;
+            if (epSources)
+            {
+                pinned = findPinnedPieces(enemyKing, enemyPieces, myBishops, myRooks, allPieces, enemyKingIndex);
+
+                if (chance == WHITE)
+                {
+                    enPassentTarget = BIT(move.getFrom() & 7) << (8 * 2);
+                }
+                else
+                {
+                    enPassentTarget = BIT(move.getFrom() & 7) << (8 * 5);
+                }
+
+            }
+
+            // check if en-passent is actually possible
+            while (epSources)
+            {
+                uint64 pawn = getOne(epSources);
+                if (pawn & pinned)
+                {
+                    // the direction of the pin (mask containing all squares in the line joining the king and the current piece)
+                    uint64 line = sqsInLine(bitScan(pawn), enemyKingIndex);
+
+                    if (enPassentTarget & line)
+                    {
+                        epLegal = true;
+                        break;
+                    }
+                }
+                else
+                {
+                    uint64 propogator = (~allPieces) | dst | pawn;
+                    uint64 causesCheck = (eastAttacks(myRooks, propogator) | westAttacks(myRooks, propogator)) &
+                                         (enemyKing);
+                    if (!causesCheck)
+                    {
+                        epLegal = true;
+                        break;
+                    }
+                }
+                epSources ^= pawn;
+            }
+
+            if (epLegal)
+#endif
+            {
+                pos->enPassent = (move.getFrom() & 7) + 1;      // store file + 1
+            }
         }
 
 #if INCREMENTAL_ZOBRIST_UPDATE == 1
@@ -3354,7 +3433,7 @@ CUDA_CALLABLE_MEMBER MY_INLINE static uint64 multiKnightAttacks(uint64 knights)
         uint64 myKing     = pos->kings & myPieces;
         uint8  kingIndex  = bitScan(myKing);
 
-        uint64 pinned     = findPinnedPieces(pos->kings & myPieces, myPieces, enemyBishops, enemyRooks, allPieces, kingIndex);
+        uint64 pinned     = findPinnedPieces(myKing, myPieces, enemyBishops, enemyRooks, allPieces, kingIndex);
 
         uint64 threatened = findAttackedSquares(~allPieces, enemyBishops, enemyRooks, allPawns & enemyPieces, 
                                                 pos->knights & enemyPieces, pos->kings & enemyPieces, 
@@ -3738,7 +3817,6 @@ uint64 computeZobristKey(HexaBitBoardPosition *pos)
 
     return key;
 }
-
 
 // random generators and basic idea of finding magics taken from:
 // http://chessprogramming.wikispaces.com/Looking+for+Magics 

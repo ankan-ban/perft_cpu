@@ -5,6 +5,8 @@
 
 #include <windows.h>
 
+#define FIND_UNIQUES 1
+
 // for timing CPU code : start
 double gTime;
 LARGE_INTEGER freq;
@@ -105,11 +107,17 @@ DWORD WINAPI workerThread(LPVOID lpParam)
     return 0;
 }
 
+#include "uniques.h"
 
 int main(int argc, char *argv[])
 {
     BoardPosition testBoard;
     MoveGeneratorBitboard::init();
+
+#if FIND_UNIQUES == 1
+    findUniques(3);
+    return 0;
+#endif
 
     if (argc >= 2)
     {
@@ -247,7 +255,7 @@ int main(int argc, char *argv[])
 
     printf("\nEnter FEN String: \n");
     char fen[1024];
-    gets(fen);
+    gets_s(fen);
     Utils::readFENString(fen, &testBoard); 
     Utils::dispBoard(&testBoard);
 

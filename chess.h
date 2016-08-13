@@ -204,14 +204,28 @@ union QuadBitBoardPosition
 {
     struct
     {
-        uint64 black;
+        uint64 white;
         uint64 pbq;
-        uint64 nb;
+        uint64 nbk;
         uint64 rqk;
     };
     uint64 bb[4];
 };
 CT_ASSERT(sizeof(QuadBitBoardPosition) == 32);
+
+union GameState
+{
+    struct
+    {
+        uint16 chance          : 1;
+        uint16 halfMoveCounter : 7;   // to detect 50 move draw rule
+        uint16 whiteCastle     : 2;
+        uint16 blackCastle     : 2;
+        uint16 enPassent       : 4;   // file + 1 (file is the file containing the enpassent-target pawn)
+    };
+    uint16 stateBits;
+};
+CT_ASSERT(sizeof(GameState) == 2);
 
 // another bit-board based board representation using 6 bitboards
 struct HexaBitBoardPosition
